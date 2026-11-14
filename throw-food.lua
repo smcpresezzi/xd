@@ -1,5 +1,6 @@
+local axisOk, axisResult = pcall(function()
 if game.GameId ~= 10766972131 then return end
-local LibrarySource = [=[return assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/lofaif1234/axisui/087d501b05f37c149cedabddbbaa96bc9eee81e7/source/game-bridge.lua"), "Axis UI bridge"))()]=]
+local LibrarySource = [=[return assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/lofaif1234/axisui/3c53b8e464fa94ede9cb592b4083eaf7aa0d6b23/source/game-bridge.lua"), "Axis UI bridge"))()]=]
 local env = getgenv()
 if env.AxisFood and env.AxisFood.Loaded then env.AxisFood.Unload() end
 local Players = game:GetService("Players")
@@ -503,3 +504,6 @@ Library:Finish(S)
 S.DisableAll()
 env.Toggles.AF_SkipCutscene:SetValue(true)
 C.SkipCutscene=true
+
+end)
+if axisOk then return axisResult end

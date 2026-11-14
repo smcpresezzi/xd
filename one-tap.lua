@@ -1,7 +1,8 @@
+local axisOk, axisResult = pcall(function()
 
 
 local Sources = {
-    Library = [=[return assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/lofaif1234/axisui/087d501b05f37c149cedabddbbaa96bc9eee81e7/source/game-bridge.lua"), "Axis UI bridge"))()]=],
+    Library = [=[return assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/lofaif1234/axisui/3c53b8e464fa94ede9cb592b4083eaf7aa0d6b23/source/game-bridge.lua"), "Axis UI bridge"))()]=],
     Adapter = [=[
 local A = {}
 local Players = game:GetService("Players")
@@ -1476,3 +1477,6 @@ local success, failure = xpcall(start, debug.traceback)
 if not success then
     getgenv().UrbanLastError = tostring(failure)
 end
+
+end)
+if axisOk then return axisResult end
