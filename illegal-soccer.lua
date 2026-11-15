@@ -36,6 +36,9 @@ return function(context)
     slider(shots,"ShotMargin","Post clearance",1.5,4,.1)
     toggle(shots,"UnsavableShot","Unsavable shot")
     toggle(shots,"PerfectCharge","Perfect charge")
+    slider(shots,"ShotCurve","Curve",-100,100)
+    toggle(shots,"FeintShot","Feint shot")
+    slider(shots,"FeintChance","Feint chance (%)",0,100)
     toggle(shots,"ShotPreview","Shot preview","ShotColor")
     local passing=combat:Section({Name="Passing",Side=2})
     toggle(passing,"AutoPass","Auto pass")
@@ -52,6 +55,8 @@ return function(context)
     slider(defense,"DribbleRange","Dribble range",5,25)
     local keeper=combat:Section({Name="Goalkeeper",Side=2})
     toggle(keeper,"AutoGoalkeeper","Enabled")
+    toggle(keeper,"KeeperAutoTackle","Auto tackle")
+    slider(keeper,"KeeperTackleRange","Tackle range",4,24)
     slider(keeper,"KeeperReaction","Reaction lead",.05,.45,.01)
     local items=combat:Section({Name="Items",Side=2})
     toggle(items,"ItemAimbot","Item aim")
@@ -389,6 +394,7 @@ local config = {
     LandingColor=Color3.fromRGB(103,227,198),ProjectileColor=Color3.fromRGB(255,130,90),ItemBoxColor=Color3.fromRGB(190,156,255),ItemFOVColor=Color3.new(1,1,1),
     ShotAimbot = false, ShotPlacement = "Auto", TargetPost = "Automatic",
     UnsavableShot = false, PerfectCharge = false, AutoPass = false,
+    ShotCurve = 0, FeintShot = false, FeintChance = 50, KeeperAutoTackle = false, KeeperTackleRange = 12,
     AutoVolley = false, TackleAimbot = false, AutoTackle = false,
     AutoDribble = false, AutoGoalkeeper = false, KeeperClearAimbot = false,
     AutoCallForPass = false, AutoSprint = false, InfiniteStamina = false,
@@ -605,6 +611,17 @@ local function get_mouth(goal)
     return modules.ShotAssist.GetGoalMouth(goal, center and center.Position or Vector3.zero)
 end
 
+local function safe_shot_target(target, mouth)
+    if not mouth then return target end
+    local clearance = math.max(modules.Physics.BallRadius + 1.25, config.ShotMargin)
+    local width = math.max(0, mouth.HalfWidth - clearance)
+    local low = mouth.BottomY + modules.Physics.BallRadius + .5
+    local high = math.max(low, mouth.TopY - clearance - .75)
+    local lateral = math.clamp((target - mouth.PlanePosition):Dot(mouth.Lateral), -width, width)
+    local point = mouth.PlanePosition + mouth.Lateral * lateral
+    return Vector3.new(point.X, math.clamp(target.Y, low, high), point.Z)
+end
+
 local function select_shot()
     local goal,team=goal_for(false)
     local root=local_root()
@@ -618,7 +635,7 @@ local function select_shot()
     local middle=(low+high)*.5
     local function point(x,y)
         local position=mouth.PlanePosition+mouth.Lateral*x
-        return Vector3.new(position.X,y,position.Z)
+        return safe_shot_target(Vector3.new(position.X,y,position.Z),mouth)
     end
     local placements={
         ["Upper Left"]=point(-width,high),["Upper Right"]=point(width,high),
@@ -758,6 +775,31 @@ local function item_target()
     return best
 end
 
+local function shot_curve()
+    if config.ShotCurve == 0 then return nil end
+    return math.clamp(config.ShotCurve / 100, -1, 1)
+end
+
+local feint_random = Random.new()
+
+local function begin_shot_feint()
+    state.FeintCommitted = false
+    state.FeintActive = config.FeintShot and feint_random:NextNumber() < math.clamp(config.FeintChance, 0, 100) / 100
+    state.FeintSide = state.FeintActive and (feint_random:NextInteger(0, 1) == 0 and -1 or 1) or nil
+    state.ShotSolution = nil
+end
+
+local function shot_target()
+    if not config.FeintShot or not state.FeintActive then return state.ShotTarget end
+    local goal = state.TargetGoal or goal_for(false)
+    local mouth = goal and get_mouth(goal)
+    if not mouth then return state.ShotTarget end
+    local clearance = math.max(modules.Physics.BallRadius + .75, config.ShotMargin)
+    local width = math.max(0, mouth.HalfWidth - clearance)
+    local position = mouth.PlanePosition + mouth.Lateral * ((state.FeintSide or 1) * (state.FeintCommitted and -width or width))
+    return safe_shot_target(Vector3.new(position.X, math.max(mouth.BottomY + clearance, mouth.TopY - clearance), position.Z), mouth)
+end
+
 local raw_velocity=modules.Shoot.GetVelocity
 local function launch_position(pass_type,aim,charge)
     local character=local_player.Character
@@ -772,7 +814,7 @@ local function predict_shot_crossing(origin,velocity,charge,goal)
     end
     if not boundary or not goal then return nil end
     local now=modules.Clock.GetSmoothedServerTime()
-    local spin=modules.Shoot.GetSpin(local_player.Character,velocity,nil,nil,charge)
+    local spin=modules.Shoot.GetSpin(local_player.Character,velocity,nil,shot_curve(),charge)
     local ball=modules.Physics.NewState(origin,velocity,modules.Physics.BallRadius,now,spin)
     ball.LastKickerUserId=local_player.UserId
     return modules.Physics.GetFirstBoxEntry(ball,boundary,goal,now,4,false)
@@ -781,13 +823,16 @@ end
 local function solve_shot(target,charge,is_throw,initial_aim)
     local character=local_player.Character
     if not character or not target then return nil end
+    local goal = not is_throw and (state.TargetGoal or goal_for(false)) or nil
+    local mouth = goal and get_mouth(goal)
+    if mouth then target = safe_shot_target(target, mouth) end
     local constants=is_throw and modules.Throw.Constants or nil
     charge=charge or modules.Shoot.GetChargeSecondsFromAlpha(1,character)
     local now=os.clock()
     local position=modules.CharacterMotion.GetPosition(character)
     local characterVelocity=modules.CharacterMotion.GetVelocity(character)
     local cached=state.ShotSolution
-    if cached and cached.Character==character and cached.IsThrow==is_throw and now-cached.At<.035
+    if cached and cached.Character==character and cached.IsThrow==is_throw and cached.Curve==shot_curve() and now-cached.At<.035
         and math.abs(cached.Charge-charge)<.001 and(cached.Target-target).Magnitude<.02
         and position and(position-cached.Position).Magnitude<.04 and(characterVelocity-cached.CharacterVelocity).Magnitude<.1 then
         return table.clone(cached.Aim),cached.Velocity,cached.Origin,cached.Direction
@@ -831,14 +876,78 @@ local function solve_shot(target,charge,is_throw,initial_aim)
         aim.Direction=Vector3.new(math.cos(yaw)*math.cos(pitch),math.sin(pitch),math.sin(yaw)*math.cos(pitch))
         aim.CameraCFrame=CFrame.lookAt(origin,origin+aim.Direction)
     end
-    velocity=raw_velocity(character,charge,aim,origin,horizontal,vertical,nil,constants,direction,target)
+    velocity=raw_velocity(character,charge,aim,origin,horizontal,vertical,nil,constants,direction,target,nil,nil,not is_throw and shot_curve() or nil)
+    if mouth and (target - origin).Magnitude <= 160 then
+        local _, boundary = modules.Renderer.GetAuthoritativeMovementState()
+        local lobby = workspace:FindFirstChild("Lobby")
+        if goal and lobby and goal:IsDescendantOf(lobby) then boundary = modules.PracticeBoundary.GetIfReady() or boundary end
+        if boundary then
+            local flight_world = table.clone(boundary)
+            flight_world.Solids = {}
+            flight_world.GroundSolids = {}
+            local curve = shot_curve()
+            local function evaluate(yaw, pitch)
+                local ray = table.clone(aim)
+                ray.Direction = Vector3.new(math.cos(yaw) * math.cos(pitch), math.sin(pitch), math.sin(yaw) * math.cos(pitch))
+                ray.CameraCFrame = CFrame.lookAt(origin, origin + ray.Direction)
+                local start = launch_position(pass_type, ray, charge) or origin
+                ray.Origin = start
+                ray.CameraCFrame = CFrame.lookAt(start, start + ray.Direction)
+                local kick_direction = flat(ray.Direction) or direction
+                local speed = raw_velocity(character, charge, ray, start, horizontal, vertical, nil, constants, kick_direction, target, nil, nil, curve)
+                if not speed then return nil end
+                local normal_speed = speed:Dot(mouth.Forward)
+                if math.abs(normal_speed) < .01 then return nil end
+                local time = (mouth.PlanePosition - start):Dot(mouth.Forward) / normal_speed
+                if time <= 0 or time > 4 then return nil end
+                local spin = modules.Shoot.GetSpin(character, speed, nil, curve, charge)
+                local ball = modules.Physics.NewState(start, speed, modules.Physics.BallRadius, 0, spin)
+                ball.LastKickerUserId = local_player.UserId
+                local sample
+                for _ = 1, 7 do
+                    sample = modules.Physics.GetStateAtTime(ball, time, flight_world)
+                    local depth = (sample.Position - mouth.PlanePosition):Dot(mouth.Forward)
+                    if math.abs(depth) < .01 then break end
+                    local rate = sample.Velocity:Dot(mouth.Forward)
+                    if math.abs(rate) < .01 then return nil end
+                    time -= depth / rate
+                    if time <= 0 or time > 4 then return nil end
+                end
+                if not sample or math.abs((sample.Position - mouth.PlanePosition):Dot(mouth.Forward)) > .1 then return nil end
+                local error_x = (sample.Position - target):Dot(mouth.Lateral)
+                local error_y = sample.Position.Y - target.Y
+                return {Direction=kick_direction,Aim=ray, Velocity=speed, Origin=start, X=error_x, Y=error_y, Loss=error_x*error_x+error_y*error_y}
+            end
+            local yaw = math.atan2(aim.Direction.Z, aim.Direction.X)
+            local pitch = math.asin(math.clamp(aim.Direction.Y, -1, 1))
+            local best
+            for _ = 1, 9 do
+                local sample = evaluate(yaw, pitch)
+                if not sample then break end
+                if not best or sample.Loss < best.Loss then best = sample end
+                if sample.Loss < .0225 then break end
+                local dx = evaluate(yaw + .01, pitch)
+                local dy = evaluate(yaw, pitch + .01)
+                if not dx or not dy then break end
+                local xx, yx = (dx.X-sample.X)/.01, (dx.Y-sample.Y)/.01
+                local xy, yy = (dy.X-sample.X)/.01, (dy.Y-sample.Y)/.01
+                local determinant = xx*yy-xy*yx
+                if math.abs(determinant) < .001 then break end
+                yaw -= math.clamp((sample.X*yy-sample.Y*xy)/determinant, -.15, .15)
+                pitch = math.clamp(pitch-math.clamp((sample.Y*xx-sample.X*yx)/determinant, -.12, .12), -.4, 1.2)
+            end
+            if best then
+                aim, velocity, origin, direction = best.Aim, best.Velocity, best.Origin, best.Direction
+            end
+        end
+    end
     if config.ShotPreview and not is_throw and state.TargetGoal and now-(state.ShotPredictionAt or 0)>.12 then
         state.ShotPredictionAt=now
         local crossing=predict_shot_crossing(origin,velocity,charge,state.TargetGoal)
         state.ShotCrossing=crossing
     end
     if position then
-        state.ShotSolution={Character=character,IsThrow=is_throw,At=now,Charge=charge,Target=target,Position=position,
+        state.ShotSolution={Character=character,IsThrow=is_throw,Curve=shot_curve(),At=now,Charge=charge,Target=target,Position=position,
             CharacterVelocity=characterVelocity,Aim=table.clone(aim),Velocity=velocity,Origin=origin,Direction=direction}
     end
     return aim,velocity,origin,direction
@@ -888,26 +997,47 @@ local function aim_payload(original)
         end
         return original
     end
-    if (config.ShotAimbot or config.UnsavableShot) and state.ShotTarget and not modules.Pass.IsCharging() and not is_goalkeeper() then
-        return solve_shot(state.ShotTarget, nil, false, original) or original
+    if (config.ShotAimbot or config.UnsavableShot or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
+        return solve_shot(shot_target(), nil, false, original) or original
     end
     return original
 end
 
 local function rewrite_command(command)
     if type(command) ~= "table" then return end
-    if not is_goalkeeper()and command.PassType == "Shot" and (config.ShotAimbot or config.UnsavableShot) and state.ShotTarget then
-        local ray, _, _, direction = solve_shot(state.ShotTarget, command.ChargeSeconds, false, command.AimDirection)
+    if not is_goalkeeper() and command.PassType == "Shot" and shot_curve() then command.Curve = shot_curve() end
+    if not is_goalkeeper()and command.PassType == "Shot" and (config.ShotAimbot or config.UnsavableShot or (config.FeintShot and state.FeintActive)) and shot_target() then
+        local ray, _, _, direction = solve_shot(shot_target(), command.ChargeSeconds, false, command.AimDirection)
         if ray then
             command.AimDirection = ray
             command.KickDirection = direction
-            command.TargetPosition = state.ShotTarget
-            command.Curve = nil
+            command.TargetPosition = ray.TargetPosition
+            command.Curve = shot_curve()
         end
     end
 end
 
 local function install_hooks()
+    patch(modules.Shoot, "GetVelocity", function(original)
+        return function(character, ...)
+            local args = table.pack(...)
+            if character == local_player.Character and not is_goalkeeper() and args[7] == nil then
+                if shot_curve() then args[12] = shot_curve() args.n = math.max(args.n, 12) end
+                if config.ShotAimbot or config.UnsavableShot or (config.FeintShot and state.FeintActive and state.FeintCommitted) then
+                    local target = shot_target()
+                    local aim, _, _, direction = solve_shot(target, args[1], false, args[2])
+                    if aim then args[2] = aim args[8] = direction args[9] = aim.TargetPosition args.n = math.max(args.n, 9) end
+                end
+            end
+            return original(character, table.unpack(args, 1, args.n))
+        end
+    end)
+    patch(modules.Shoot, "GetSpin", function(original)
+        return function(character, velocity, movement, curve, charge)
+            if character == local_player.Character and not is_goalkeeper() and shot_curve() then curve = shot_curve() end
+            return original(character, velocity, movement, curve, charge)
+        end
+    end)
     patch(modules.Ragdoll,"SetEnabled",function(original)
         return function(character,enabled,...)
             if config.AntiRagdoll and character==local_player.Character and enabled then
@@ -927,9 +1057,13 @@ local function install_hooks()
     for _, name in {"Start", "Update", "Release", "Send", "LockAim"} do
         patch(modules.Protocol, name, function(original)
             return function(command, ...)
+                if type(command)=="table" and command.PassType=="Shot" then
+                    if name=="Start" then begin_shot_feint() end
+                    if name=="LockAim" or name=="Release" then state.FeintCommitted=true end
+                end
                 guarded("command aim", rewrite_command, command)
                 if name=="Release"and type(command)=="table"and command.PassType=="Shot"then
-                    state.LastShotTarget=state.ShotTarget state.LastShotAt=os.clock()
+                    state.LastShotTarget=shot_target() state.LastShotAt=os.clock()
                 end
                 return original(command, ...)
             end
@@ -939,6 +1073,9 @@ local function install_hooks()
         return function(input, processed, ...)
             if is_goalkeeper()then return original(input,processed,...)end
             if not processed and modules.Controls.IsInput("Kick", input) then
+                if not modules.ClientShoot.IsCharging() then
+                    state.FeintActive, state.FeintSide, state.FeintCommitted = false, nil, false
+                end
                 state.ShotInput = input
                 state.FullChargeAt = nil
             end
@@ -951,7 +1088,7 @@ local function install_hooks()
             if (config.PerfectCharge or config.UnsavableShot) and not state.ReleasingPerfect and state.ShotInput == input and modules.ClientShoot.IsCharging() then
                 return true
             end
-            if state.ShotInput == input then state.ShotInput = nil end
+            if state.ShotInput == input then state.FeintCommitted = true state.ShotInput = nil end
             return original(input, ...)
         end
     end)
@@ -976,7 +1113,7 @@ local function install_hooks()
     patch(modules.Tackle, "HandleInputBegan", function(original)
         return function(input, processed)
             local root = local_root()
-            if config.TackleAimbot and root and not processed and modules.Controls.IsInput("Tackle", input) then
+            if (config.TackleAimbot or (config.KeeperAutoTackle and is_goalkeeper())) and root and not processed and modules.Controls.IsInput("Tackle", input) then
                 local owner = modules.Renderer.GetOwnedUserId()
                 local enemy = enemy_near(root.Position, config.TackleRange + 8)
                 for _, actor in state.Actors do
@@ -1012,9 +1149,13 @@ local function install_hooks()
         end
     end)
     patch(modules.Dive, "GetDirectionChoice", function(original)
-        return function(...)
-            if state.DiveDirection and state.AutomaticDiveThread==coroutine.running()then return modules.Dive.GetDirectionChoiceByName("F")end
-            return original(...)
+        return function(direction, camera, fallback)
+            if state.DiveDirection and state.AutomaticDiveThread==coroutine.running() then
+                local choice = original(state.DiveDirection, camera, fallback)
+                state.DiveChoice = choice
+                return choice
+            end
+            return original(direction, camera, fallback)
         end
     end)
     patch(modules.Dive, "GetWorldDirection", function(original)
@@ -1025,13 +1166,22 @@ local function install_hooks()
     end)
     patch(modules.Dive, "Run", function(original)
         return function(root, humanoid, choice, get_camera, options)
-            local direction = state.DiveDirection
-            if direction and root == local_root() then
-                get_camera = function() return CFrame.lookAt(root.Position, root.Position + direction) end
+            if state.DiveDirection and root == local_root() and state.AutomaticDiveThread == coroutine.running() then
+                local direction = state.DiveDirection
+                local right = Vector3.new(-direction.Z, 0, direction.X)
+                local forward = (direction * choice.Forward - right * choice.Right).Unit
+                get_camera = function() return CFrame.lookAt(root.Position, root.Position + forward) end
             end
             return original(root, humanoid, choice, get_camera, options)
         end
     end)
+    patch(modules.TurnControl, "HasAutoRotateLock", function(original)
+        return function(...)
+            if state.DiveDirection and state.AutomaticDiveThread==coroutine.running() then return true end
+            return original(...)
+        end
+    end)
+
 end
 
 local function create(class_name, properties, parent)
@@ -1322,6 +1472,7 @@ local function keeper_step()
     local accepted=guarded("keeper dive",modules.Keeper.Dive)
     state.DiveDirection=nil
     state.AutomaticDiveThread=nil
+    state.DiveChoice=nil
     if accepted then
         state.KeeperNextDiveAt=os.clock()+modules.Dive.Constants.RepeatDelaySeconds
     else
@@ -1442,10 +1593,10 @@ local function automation_step()
                 if modules.ClientShoot.IsCharging() then  end
             end
         end
-        if config.AutoTackle and not is_goalkeeper() and not modules.ClientShoot.IsCharging() and not modules.Tackle.IsSlideTackling() and ready("tackle", 0.25) then
+        if ((config.AutoTackle and not is_goalkeeper()) or (config.KeeperAutoTackle and is_goalkeeper())) and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dive.IsDiveConstraintActive(root) and not modules.Tackle.IsSlideTackling() and ready("tackle", 0.25) then
             local owner = modules.Renderer.GetOwnedUserId()
             for _, actor in state.Actors do
-                if actor.UserId == owner and not actor.Friendly and (actor.Root.Position - root.Position).Magnitude <= config.TackleRange then
+                if actor.UserId == owner and not actor.Friendly and (actor.Root.Position - root.Position).Magnitude <= (is_goalkeeper() and config.KeeperTackleRange or config.TackleRange) then
                     modules.Tackle.HandleInputBegan(modules.Controls.CreateInput("Tackle"), false)
                     if modules.Tackle.IsSlideTackling() then  end
                     break
@@ -1491,6 +1642,8 @@ end
 
 local function set_config(key,value)
     config[key]=value
+    if key=="ShotCurve" or key=="FeintShot" then state.ShotSolution=nil end
+    if key=="FeintShot" and not value then state.FeintActive, state.FeintSide = false, nil end
     if key=="InfiniteStamina"then modules.Sprint.SetUnlimitedStamina("AxisSoccer",value)end
     if key=="AntiRagdoll"and not value then modules.Movement.ClearServerRagdollSuppression("AxisSoccer")end
     if key=="SpeedBoost"and not value then modules.Movement.ClearMultiplier("AxisSoccerSpeed")end
@@ -1530,7 +1683,7 @@ local ok, err = xpcall(function()
         if ready("world", 0.5) then guarded("world", refresh_items) end
         if ready("target", 0.08) then
             guarded("targets", function()
-                if config.ShotAimbot or config.UnsavableShot or config.ShotPreview then
+                if config.ShotAimbot or config.UnsavableShot or config.ShotPreview or config.FeintShot then
                     local target,goal=select_shot()
                     if state.TargetGoal~=goal or not target or not state.ShotTarget or(target-state.ShotTarget).Magnitude>.1 then state.ShotCrossing=nil end
                     state.ShotTarget,state.TargetGoal=target,goal
@@ -1549,6 +1702,8 @@ local ok, err = xpcall(function()
         state.MoveDirection, state.DiveDirection, state.Crossing = nil, nil, nil
         state.BallState, state.Boundary, state.Landing = nil, nil, nil
         state.AutoShot = false
+        state.FeintCommitted, state.ShotSolution, state.DiveChoice = nil, nil, nil
+        state.FeintActive, state.FeintSide = false, nil
         table.clear(state.Points)
     end)
 end,function(message)return tostring(message)end)
