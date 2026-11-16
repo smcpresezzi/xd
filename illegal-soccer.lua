@@ -105,6 +105,7 @@ return function(context)
     local possession=utility:Section({Name="Possession",Side=2})
     toggle(possession,"BallMagnet","Ball magnet")
     slider(possession,"MagnetRange","Range",4,24)
+    slider(possession,"MagnetStealRange","Steal distance",2,5,.1)
     slider(possession,"MagnetCooldown","Cooldown",.3,2,.1)
     library:CreateSettingsPage(window)
     local settings=window.Pages[#window.Pages]:Section({Name="Session",Side=2})
@@ -466,7 +467,7 @@ local config = {
     WorldItemESP = false, ProjectileESP = false, ESPDistance = 600,
     ShowTeammates = true, ItemAimbot = false, ItemAimFOV = 180,
     ShowItemFOV = false, AutoUseItem = false, TackleRange = 15,
-    DribbleRange = 14, MagnetRange = 14, PassRange = 100,
+    DribbleRange = 14, MagnetRange = 14, MagnetStealRange = 3.2, PassRange = 100,
     CallInterval = 2.5, KeeperReaction = 0.18,
     EnemyColor = Color3.fromRGB(250, 109, 129),
     TeamColor = Color3.fromRGB(103, 191, 255),
@@ -688,12 +689,16 @@ local function get_mouth(goal)
     return modules.ShotAssist.GetGoalMouth(goal, center and center.Position or Vector3.zero)
 end
 
+local function shot_clearance()
+    return math.max(modules.Physics.BallRadius + 3, config.ShotMargin + 1.5)
+end
+
 local function safe_shot_target(target, mouth)
     if not mouth then return target end
-    local clearance = math.max(modules.Physics.BallRadius + 1.25, config.ShotMargin)
+    local clearance = shot_clearance()
     local width = math.max(0, mouth.HalfWidth - clearance)
-    local low = mouth.BottomY + modules.Physics.BallRadius + .5
-    local high = math.max(low, mouth.TopY - clearance - .75)
+    local low = mouth.BottomY + clearance
+    local high = math.max(low, mouth.TopY - clearance)
     local lateral = math.clamp((target - mouth.PlanePosition):Dot(mouth.Lateral), -width, width)
     local point = mouth.PlanePosition + mouth.Lateral * lateral
     return Vector3.new(point.X, math.clamp(target.Y, low, high), point.Z)
@@ -705,7 +710,7 @@ local function select_shot()
     if not goal or not root then return nil end
     local mouth=get_mouth(goal)
     if not mouth then return nil end
-    local clearance=math.max(modules.Physics.BallRadius+.75,config.ShotMargin)
+    local clearance=shot_clearance()
     local width=math.max(0,mouth.HalfWidth-clearance)
     local low=mouth.BottomY+clearance
     local high=math.max(low,mouth.TopY-clearance)
@@ -793,6 +798,32 @@ local function select_shot()
     return best or placements.Center,goal
 end
 
+local function select_flick_shot()
+    local goal,team=goal_for(false)
+    local root=local_root()
+    if not goal or not root then return nil end
+    local mouth=get_mouth(goal)
+    if not mouth then return nil end
+    local keeper
+    for _,actor in ipairs(state.Actors)do
+        if actor.Keeper and actor.Root.Parent and (actor.Team==team or team=="Practice")then
+            keeper=actor
+            break
+        end
+    end
+    local predicted=keeper and keeper.Root.Position+keeper.Root.AssemblyLinearVelocity*.18
+    local reference=predicted or root.Position
+    local side=(reference-mouth.PlanePosition):Dot(mouth.Lateral)>=0 and -1 or 1
+    local clearance=shot_clearance()
+    local width=math.max(0,mouth.HalfWidth-clearance)
+    local low=mouth.BottomY+clearance
+    local middle=(mouth.BottomY+mouth.TopY)*.5
+    local position=mouth.PlanePosition+mouth.Lateral*side*width
+    local height=low
+    if predicted and math.abs(middle-predicted.Y)*1.3>math.abs(low-predicted.Y)+.4 then height=middle end
+    return safe_shot_target(Vector3.new(position.X,height,position.Z),mouth),goal,side
+end
+
 local function best_teammate()
     local root = local_root()
     local goal = goal_for(false)
@@ -853,6 +884,7 @@ local function item_target()
 end
 
 local function shot_curve()
+    if state.MagnetSteal then return nil end
     if config.ShotCurve == 0 then return nil end
     return math.clamp(config.ShotCurve / 100, -1, 1)
 end
@@ -868,11 +900,12 @@ local function begin_shot_feint()
 end
 
 local function shot_target()
+    if state.FlickVolley and state.FlickShotTarget then return state.FlickShotTarget end
     if not config.FeintShot or not state.FeintActive then return state.ShotTarget end
     local goal = state.TargetGoal or goal_for(false)
     local mouth = goal and get_mouth(goal)
     if not mouth then return state.ShotTarget end
-    local clearance = math.max(modules.Physics.BallRadius + .75, config.ShotMargin)
+    local clearance = shot_clearance()
     local width = math.max(0, mouth.HalfWidth - clearance)
     local blend=math.clamp((os.clock()-(state.FeintSwitchAt or 0))/.15,0,1)
     blend=blend*blend*(3-2*blend)
@@ -883,7 +916,7 @@ end
 
 local function begin_shot_flick()
     state.FlickAttemptAt=os.clock()
-    if not config.FlickShot or not can_act() or not owns_ball()or is_goalkeeper()then return false end
+    if not config.FlickShot or state.FlickVolley or not can_act() or not owns_ball()or is_goalkeeper()then return false end
     if not modules.Controls.IsRainbowFlickUnlocked()or modules.Controls.IsOnCooldown("RainbowFlick")then return false end
     if not state.NativeFlick then
         for _,callback in ipairs(getgc(true))do
@@ -900,6 +933,9 @@ local function begin_shot_flick()
         or not modules.RainbowFlick.GetWindingUpUntil(local_player)then return false end
     state.FlickPending=os.clock()+1.5
     state.FlickTriggeredAt=os.clock()
+    state.FlickJiggleStarted=os.clock()
+    local _,_,side=select_flick_shot()
+    state.FlickJiggleSide=side
     return true
 end
 
@@ -923,10 +959,10 @@ local function predict_shot_crossing(origin,velocity,charge,goal)
     return modules.Physics.GetFirstBoxEntry(ball,boundary,goal,now,4,false)
 end
 
-local function solve_shot(target,charge,is_throw,initial_aim)
+local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
     local character=local_player.Character
     if not character or not target then return nil end
-    local goal = not is_throw and (state.TargetGoal or goal_for(false)) or nil
+    local goal = not is_throw and (state.FlickVolley and state.FlickGoal or state.TargetGoal or goal_for(false)) or nil
     local mouth = goal and get_mouth(goal)
     if mouth then target = safe_shot_target(target, mouth) end
     local constants=is_throw and modules.Throw.Constants or nil
@@ -1019,7 +1055,8 @@ local function solve_shot(target,charge,is_throw,initial_aim)
                 if not sample or math.abs((sample.Position - mouth.PlanePosition):Dot(mouth.Forward)) > .1 then return nil end
                 local error_x = (sample.Position - target):Dot(mouth.Lateral)
                 local error_y = sample.Position.Y - target.Y
-                return {Direction=kick_direction,Aim=ray, Velocity=speed, Origin=start, X=error_x, Y=error_y, Loss=error_x*error_x+error_y*error_y}
+                return {Direction=kick_direction,Aim=ray, Velocity=speed, Origin=start, X=error_x, Y=error_y,
+                    Loss=error_x*error_x+error_y*error_y,Time=time,Ball=ball,Crossing=sample.Position}
             end
             local yaw = math.atan2(aim.Direction.Z, aim.Direction.X)
             local pitch = math.asin(math.clamp(aim.Direction.Y, -1, 1))
@@ -1038,6 +1075,21 @@ local function solve_shot(target,charge,is_throw,initial_aim)
                 if math.abs(determinant) < .001 then break end
                 yaw -= math.clamp((sample.X*yy-sample.Y*xy)/determinant, -.15, .15)
                 pitch = math.clamp(pitch-math.clamp((sample.Y*xx-sample.X*yx)/determinant, -.12, .12), -.4, 1.2)
+            end
+            if best and not post_retry then
+                local ok,actual=pcall(modules.Physics.GetStateAtTime,best.Ball,best.Time,boundary)
+                local safeWidth=math.max(0,mouth.HalfWidth-shot_clearance()+.5)
+                local blocked=ok and actual and (actual.Position-best.Crossing).Magnitude>1.5
+                local outside=math.abs((best.Crossing-mouth.PlanePosition):Dot(mouth.Lateral))>safeWidth
+                    or best.Crossing.Y<mouth.BottomY+modules.Physics.BallRadius+1
+                    or best.Crossing.Y>mouth.TopY-modules.Physics.BallRadius-1
+                if blocked or outside or best.Loss>2.25 then
+                    local position=mouth.PlanePosition+mouth.Lateral*math.clamp((target-mouth.PlanePosition):Dot(mouth.Lateral),-safeWidth*.7,safeWidth*.7)
+                    local fallback=Vector3.new(position.X,math.clamp(target.Y,mouth.BottomY+shot_clearance(),mouth.TopY-shot_clearance()),position.Z)
+                    if (fallback-target).Magnitude>.1 then
+                        return solve_shot(fallback,charge,is_throw,initial_aim,true)
+                    end
+                end
             end
             if best then
                 aim, velocity, origin, direction = best.Aim, best.Velocity, best.Origin, best.Direction
@@ -1058,6 +1110,18 @@ end
 
 local function aim_payload(original)
     if not state.Alive or not can_act() then return original end
+    if state.MagnetSteal then
+        local target=modules.Renderer.GetPosition()
+        local origin=original and original.Origin or workspace.CurrentCamera.CFrame.Position
+        if target and (target-origin).Magnitude>.01 then
+            local result=table.clone(original or {})
+            result.Origin=origin result.Direction=(target-origin).Unit
+            result.CameraCFrame=CFrame.lookAt(origin,target)
+            result.TargetPosition=target result.ClientHit=nil
+            return result
+        end
+        return original
+    end
     if modules.ItemUse.IsEquipped() then
         if config.ItemAimbot and state.ItemTarget and state.ItemTarget.Root.Parent then
             local target = state.ItemTarget.Root.Position
@@ -1100,7 +1164,7 @@ local function aim_payload(original)
         end
         return original
     end
-    if (config.ShotAimbot or config.UnsavableShot or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
+    if (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
         return solve_shot(shot_target(), nil, false, original) or original
     end
     return original
@@ -1108,8 +1172,9 @@ end
 
 local function rewrite_command(command)
     if type(command) ~= "table" then return end
+    if state.MagnetSteal then return end
     if not is_goalkeeper() and command.PassType == "Shot" and shot_curve() then command.Curve = shot_curve() end
-    if not is_goalkeeper()and command.PassType == "Shot" and (config.ShotAimbot or config.UnsavableShot or (config.FeintShot and state.FeintActive)) and shot_target() then
+    if not is_goalkeeper()and command.PassType == "Shot" and (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or (config.FeintShot and state.FeintActive)) and shot_target() then
         local ray, _, _, direction = solve_shot(shot_target(), command.ChargeSeconds, false, command.AimDirection)
         if ray then
             command.AimDirection = ray
@@ -1124,9 +1189,9 @@ local function install_hooks()
     patch(modules.Shoot, "GetVelocity", function(original)
         return function(character, ...)
             local args = table.pack(...)
-            if character == local_player.Character and not is_goalkeeper() and args[7] == nil then
+            if character == local_player.Character and not state.MagnetSteal and not is_goalkeeper() and args[7] == nil then
                 if shot_curve() then args[12] = shot_curve() args.n = math.max(args.n, 12) end
-                if config.ShotAimbot or config.UnsavableShot or (config.FeintShot and state.FeintActive and state.FeintCommitted) then
+                if config.ShotAimbot or config.UnsavableShot or state.FlickVolley or (config.FeintShot and state.FeintActive and state.FeintCommitted) then
                     local target = shot_target()
                     local aim, _, _, direction = solve_shot(target, args[1], false, args[2])
                     if aim then args[2] = aim args[8] = direction args[9] = aim.TargetPosition args.n = math.max(args.n, 9) end
@@ -1137,7 +1202,7 @@ local function install_hooks()
     end)
     patch(modules.Shoot, "GetSpin", function(original)
         return function(character, velocity, movement, curve, charge)
-            if character == local_player.Character and not is_goalkeeper() and shot_curve() then curve = shot_curve() end
+            if character == local_player.Character and not state.MagnetSteal and not is_goalkeeper() and shot_curve() then curve = shot_curve() end
             return original(character, velocity, movement, curve, charge)
         end
     end)
@@ -1161,14 +1226,19 @@ local function install_hooks()
         patch(modules.Protocol, name, function(original)
             return function(command, ...)
                 if type(command)=="table" and command.PassType=="Shot" then
-                    if name=="Start" then begin_shot_feint() end
+                    if name=="Start" and not state.MagnetSteal then begin_shot_feint() end
                     if name=="Release" then state.FeintCommitted=true end
                 end
                 guarded("command aim", rewrite_command, command)
                 if name=="Release"and type(command)=="table"and command.PassType=="Shot"then
-                    state.LastShotTarget=shot_target() state.LastShotAt=os.clock()
+                    if not state.MagnetSteal then state.LastShotTarget=shot_target() state.LastShotAt=os.clock() end
                 end
-                return original(command, ...)
+                local result=table.pack(original(command,...))
+                if name=="Release"and type(command)=="table"and command.PassType=="Shot"then
+                    if state.FlickVolley then state.FlickVolleyReleasedAt=os.clock() end
+                    state.FlickVolley=false state.FlickShotTarget=nil state.FlickGoal=nil
+                end
+                return table.unpack(result,1,result.n)
             end
         end)
     end
@@ -1566,12 +1636,13 @@ local function keeper_step()
     if not root or not goal then return false end
     local mouth=get_mouth(goal)
     if not mouth then return false end
-    if config.KeeperDiveOnContact and not modules.Dive.IsDiveConstraintActive(root)
+    local carrier=modules.Renderer.GetOwnedUserId()
+    if config.KeeperDiveOnContact and carrier and not modules.Dive.IsDiveConstraintActive(root)
         and not modules.Tackle.IsSlideTackling()then
         local zone=goal.Parent and goal.Parent:FindFirstChild("Goalkeeper")
         local nearest,nearestDistance=nil,config.KeeperDiveRange
         for _,actor in ipairs(state.Actors)do
-            if not actor.Friendly and actor.Root.Parent and actor.Character.Parent
+            if actor.UserId==carrier and not actor.Friendly and actor.Root.Parent and actor.Character.Parent
                 and not actor.Character:GetAttribute("Ragdolled")then
                 local inside=false
                 if zone and zone:IsA("BasePart")then
@@ -1623,14 +1694,60 @@ local function keeper_step()
     return true
 end
 
+local function magnet_kick(owner,position,root)
+    if not owner or owner==local_player.UserId or is_goalkeeper()or state.MagnetStealInput
+        or modules.ClientShoot.IsCharging()or modules.Pass.IsCharging()then return end
+    local enemy
+    for _,actor in ipairs(state.Actors)do
+        if actor.UserId==owner and not actor.Friendly then enemy=actor break end
+    end
+    local offset=position-root.Position
+    local horizontal=Vector3.new(offset.X,0,offset.Z)
+    if not enemy or offset.Magnitude>config.MagnetStealRange
+        or horizontal.Magnitude>config.MagnetStealRange-.4 or math.abs(offset.Y)>2.25 then return end
+    if horizontal.Magnitude>.01 and root.CFrame.LookVector:Dot(horizontal.Unit)<.65 then return end
+    if not ready("magnet kick",.8)then return end
+    local input=modules.Controls.CreateInput("Kick")
+    state.MagnetSteal=true
+    state.MagnetStealAttemptAt=os.clock()
+    state.MagnetStealAttemptDistance=offset.Magnitude
+    guarded("magnet kick",modules.ClientShoot.HandleInputBegan,input,false)
+    if modules.ClientShoot.IsCharging()then
+        state.MagnetStealChargedAt=os.clock()
+        state.MagnetStealInput=input
+        state.MagnetStealReleaseAt=os.clock()+.18
+    else
+        state.MagnetSteal=false state.ShotInput=nil
+    end
+end
+
 local function magnet_step()
-    if not config.BallMagnet or owns_ball()then return end
+    if not config.BallMagnet or owns_ball()or state.MagnetStealInput then
+        state.MagnetDirection=nil
+        return
+    end
     local root=local_root()
     local position=modules.Renderer.GetPosition()
-    if not root or not position or(position-root.Position).Magnitude>config.MagnetRange then return end
+    if not root or not position or(position-root.Position).Magnitude>config.MagnetRange then
+        state.MagnetDirection=nil
+        return
+    end
     local owner=modules.Renderer.GetOwnedUserId()
     if owner then
-        for _,actor in ipairs(state.Actors)do if actor.UserId==owner and actor.Friendly then return end end
+        local enemy
+        for _,actor in ipairs(state.Actors)do
+            if actor.UserId==owner then
+                if actor.Friendly then state.MagnetDirection=nil return end
+                enemy=actor
+                break
+            end
+        end
+        if not enemy then state.MagnetDirection=nil return end
+        state.MagnetDirection=nil
+        local toward=flat(position-root.Position)
+        if toward then state.MoveDirection=toward end
+        magnet_kick(owner,position,root)
+        return
     end
     local predicted=position
     if not owner and state.BallState and state.Boundary then
@@ -1638,30 +1755,39 @@ local function magnet_step()
         predicted=modules.Physics.GetStateAtTime(state.BallState,now+.08,state.Boundary).Position
     end
     local delta=Vector3.new(predicted.X-root.Position.X,0,predicted.Z-root.Position.Z)
-    if delta.Magnitude<1.5 or math.abs(predicted.Y-root.Position.Y)>7 then return end
-    local params=RaycastParams.new()
-    params.FilterType=Enum.RaycastFilterType.Exclude
-    local excluded={local_player.Character,state.World}
-    for _,actor in ipairs(state.Actors)do excluded[#excluded+1]=actor.Character end
-    local ball=workspace:FindFirstChild("Ball")if ball then excluded[#excluded+1]=ball end
-    params.FilterDescendantsInstances=excluded params.RespectCanCollide=true
-    local obstruction=workspace:Raycast(root.Position,delta,params)
-    if obstruction then state.MoveDirection=delta.Unit return end
-    if not ready("magnet",config.MagnetCooldown)then return end
-    local target=predicted-delta.Unit*(modules.Physics.BallRadius+.35)
-    local ground=workspace:Raycast(target+Vector3.new(0,8,0),Vector3.new(0,-24,0),params)
-    local humanoid=local_player.Character:FindFirstChildOfClass("Humanoid")
-    local height=humanoid.HipHeight+root.Size.Y*.5
-    target=Vector3.new(target.X,ground and ground.Position.Y+height or root.Position.Y,target.Z)
-    root.CFrame=CFrame.lookAt(target,target+delta.Unit)
-    root.AssemblyLinearVelocity=Vector3.zero
-    if owner and not modules.Keeper.IsGoalkeeper()and ready("magnet tackle",.8)then
-        modules.Tackle.HandleInputBegan(modules.Controls.CreateInput("Tackle"),false)
+    if math.abs(predicted.Y-root.Position.Y)>7 then return end
+    if delta.Magnitude<1.5 then state.MagnetDirection=nil return end
+    if not state.MagnetDirection or ready("magnet",config.MagnetCooldown)then
+        state.MagnetDirection=delta.Unit
     end
+    state.MoveDirection=state.MagnetDirection
 end
 
 local function automation_step()
     state.MoveDirection = nil
+    if state.MagnetStealInput and (not config.BallMagnet or owns_ball()
+        or not modules.ClientShoot.IsCharging()or os.clock()>=(state.MagnetStealReleaseAt or 0))then
+        local input=state.MagnetStealInput
+        if modules.ClientShoot.IsCharging()then
+            local root=local_root()
+            local ball=modules.Renderer.GetPosition()
+            local offset=root and ball and ball-root.Position
+            local horizontal=offset and Vector3.new(offset.X,0,offset.Z)
+            local aligned=horizontal and horizontal.Magnitude>.01
+                and root.CFrame.LookVector:Dot(horizontal.Unit)>=.4
+            if config.BallMagnet and not owns_ball()and offset
+                and offset.Magnitude<=config.MagnetStealRange+.6 and aligned then
+                state.ReleasingPerfect=true
+                guarded("magnet kick release",modules.ClientShoot.HandleInputEnded,input)
+                state.MagnetStealReleasedAt=os.clock()
+                state.ReleasingPerfect=false
+            else
+                guarded("magnet kick cancel",modules.ClientShoot.CancelCharge)
+            end
+        end
+        state.MagnetStealInput=nil state.MagnetSteal=false
+        state.MagnetStealCooldownUntil=os.clock()+.35
+    end
     if config.SpeedBoost then modules.Movement.SetMultiplier("AxisSoccerSpeed",{WalkSpeed=config.SpeedMultiplier})
     else modules.Movement.ClearMultiplier("AxisSoccerSpeed")end
     if config.AntiRagdoll and ready("ragdoll",.4)then
@@ -1672,6 +1798,18 @@ local function automation_step()
     if not can_act() then return end
     local root = local_root()
     local has_ball = owns_ball()
+    if state.FlickPending and os.clock()>state.FlickPending then
+        state.FlickPending=nil state.FlickJiggleSide=nil
+    end
+    if state.FlickPending and state.FlickJiggleSide and state.FlickJiggleStarted then
+        local elapsed=os.clock()-state.FlickJiggleStarted
+        local goal=goal_for(false)
+        local mouth=goal and get_mouth(goal)
+        if mouth and elapsed<.42 then
+            local phase=math.floor(elapsed/.14)%2==0 and -1 or 1
+            state.MoveDirection=mouth.Lateral*state.FlickJiggleSide*phase
+        end
+    end
     if state.HadBall~=has_ball then
         state.HadBall=has_ball
         state.PossessionSince=has_ball and os.clock()or nil
@@ -1694,6 +1832,10 @@ local function automation_step()
     elseif not modules.ClientShoot.IsCharging() then
         state.AutoShot = false
     end
+    if state.FlickVolley and not modules.ClientShoot.IsCharging() and not state.AutoShot
+        and os.clock()-(state.FlickVolleyStartedAt or 0)>.3 then
+        state.FlickVolley=false state.FlickShotTarget=nil state.FlickGoal=nil
+    end
     if state.PassInput then
         if not has_ball or not config.AutoPass then
             modules.Pass.CancelCharge()
@@ -1711,9 +1853,9 @@ local function automation_step()
         end
         return
     end
-    if not keeper_step() then magnet_step() end
+    if not keeper_step() and not state.FlickPending then magnet_step() end
     if has_ball then
-        if config.AutoDribble and not is_goalkeeper()and not modules.Dodge.IsDribbling()
+        if config.AutoDribble and not state.FlickPending and not is_goalkeeper()and not modules.Dodge.IsDribbling()
             and not modules.ClientShoot.IsCharging()and not modules.Pass.IsCharging()
             and state.PossessionSince and os.clock()-state.PossessionSince>.35 then
             local enemy=enemy_near(root.Position,math.min(config.DribbleRange,11))
@@ -1724,7 +1866,7 @@ local function automation_step()
                 end
             end
         end
-        if config.AutoPass and not state.PassInput and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dodge.IsDribbling() and ready("pass", 1.1) then
+        if config.AutoPass and not state.FlickPending and not state.PassInput and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dodge.IsDribbling() and ready("pass", 1.1) then
             local teammate = best_teammate()
             if teammate then
                 state.PassTarget = teammate
@@ -1735,15 +1877,21 @@ local function automation_step()
             end
         end
     else
-        if state.FlickPending and os.clock()>state.FlickPending then state.FlickPending=nil end
         if state.FlickPending and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging()
             and modules.Volley.IsAvailable(local_player.Character)then
             state.FlickPending=nil
+            state.FlickJiggleSide=nil
+            state.FlickShotTarget,state.FlickGoal=select_flick_shot()
+            state.FlickVolley=state.FlickShotTarget~=nil
+            state.FlickVolleyStartedAt=os.clock()
             state.ShotInput=modules.Controls.CreateInput("Kick")
             state.AutoShot=true
             modules.ClientShoot.HandleInputBegan(state.ShotInput,false)
+            if not modules.ClientShoot.IsCharging()then
+                state.FlickVolley=false state.FlickShotTarget=nil state.FlickGoal=nil state.AutoShot=false
+            end
         end
-        if config.AutoVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.18) then
+        if config.AutoVolley and not state.FlickVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.18) then
             if modules.Volley.IsAvailable(local_player.Character) then
                 state.ShotInput = modules.Controls.CreateInput("Kick")
                 state.AutoShot = true
@@ -1751,13 +1899,19 @@ local function automation_step()
                 if modules.ClientShoot.IsCharging() then  end
             end
         end
-        if ((config.AutoTackle and not is_goalkeeper()) or (config.KeeperAutoTackle and is_goalkeeper())) and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dive.IsDiveConstraintActive(root) and not modules.Tackle.IsSlideTackling() and ready("tackle", 0.25) then
+        if ((config.AutoTackle and not is_goalkeeper()) or (config.KeeperAutoTackle and is_goalkeeper()))
+            and not state.MagnetStealInput and os.clock()>=(state.MagnetStealCooldownUntil or 0)
+            and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dive.IsDiveConstraintActive(root) and not modules.Tackle.IsSlideTackling() and ready("tackle", 0.25) then
             local owner = modules.Renderer.GetOwnedUserId()
-            for _, actor in state.Actors do
-                if actor.UserId == owner and not actor.Friendly and (actor.Root.Position - root.Position).Magnitude <= (is_goalkeeper() and config.KeeperTackleRange or config.TackleRange) then
-                    modules.Tackle.HandleInputBegan(modules.Controls.CreateInput("Tackle"), false)
-                    if modules.Tackle.IsSlideTackling() then  end
-                    break
+            local ball=modules.Renderer.GetPosition()
+            if not (config.BallMagnet and not is_goalkeeper()and owner and ball
+                and(ball-root.Position).Magnitude<=config.MagnetRange)then
+                for _, actor in state.Actors do
+                    if actor.UserId == owner and not actor.Friendly and (actor.Root.Position - root.Position).Magnitude <= (is_goalkeeper() and config.KeeperTackleRange or config.TackleRange) then
+                        modules.Tackle.HandleInputBegan(modules.Controls.CreateInput("Tackle"), false)
+                        if modules.Tackle.IsSlideTackling() then  end
+                        break
+                    end
                 end
             end
         end
@@ -1781,6 +1935,7 @@ local function unload()
     for _, connection in state.Connections do connection:Disconnect() end
     state.MoveDirection, state.DiveDirection, state.TackleDirection = nil, nil, nil
     if state.AutoShot then pcall(modules.ClientShoot.CancelCharge) end
+    if state.MagnetStealInput then pcall(modules.ClientShoot.CancelCharge) end
     if state.PassInput then pcall(modules.Pass.CancelCharge) end
     pcall(modules.Sprint.SetUnlimitedStamina, "AxisSoccer", false)
     if state.OwnedSprintToggle and modules.Sprint.IsSprintButtonToggled() then
@@ -1801,8 +1956,12 @@ end
 
 local function set_config(key,value)
     config[key]=value
-    if key=="FlickShot"and not value then state.FlickPending=nil end
+    if key=="FlickShot"and not value then
+        state.FlickPending=nil state.FlickVolley=false state.FlickShotTarget=nil
+        state.FlickGoal=nil state.FlickJiggleSide=nil
+    end
     if key=="AutoPass"and not value then state.PassTarget=nil end
+    if key=="BallMagnet"and not value then state.MagnetDirection=nil end
     if key=="AutoGoalkeeper"and not value then state.DiveDirection=nil state.MoveDirection=nil end
     if key=="ShotCurve" or key=="FeintShot" then state.ShotSolution=nil end
     if key=="FeintShot" and not value then state.FeintActive, state.FeintSide = false, nil end
@@ -1867,7 +2026,10 @@ local ok, err = xpcall(function()
         state.AutoShot = false
         state.FeintCommitted, state.ShotSolution, state.DiveChoice = nil, nil, nil
         state.FeintActive, state.FeintSide, state.FeintSwitchAt = false, nil, nil
-        state.FlickPending=nil state.PossessionSince=nil
+        state.FlickPending=nil state.FlickVolley=false state.FlickShotTarget=nil
+        state.FlickGoal=nil state.FlickJiggleSide=nil state.PossessionSince=nil
+        state.MagnetSteal=false state.MagnetStealInput=nil
+        state.MagnetDirection=nil
         table.clear(state.Points)
     end)
 end,function(message)return tostring(message)end)
