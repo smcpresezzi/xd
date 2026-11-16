@@ -34,6 +34,7 @@ return function(context)
     toggle(shots,"ShotAimbot","Enabled")
     dropdown(shots,"ShotPlacement","Placement",{"Auto","Upper Left","Upper Right","Lower Left","Lower Right","Center"})
     dropdown(shots,"TargetPost","Target goal",{"Automatic","Team1","Team2"})
+    slider(shots,"ShootRange","Shoot range",25,250,5)
     slider(shots,"ShotMargin","Post clearance",1.5,4,.1)
     toggle(shots,"UnsavableShot","Unsavable shot")
     toggle(shots,"PerfectCharge","Perfect charge")
@@ -60,6 +61,7 @@ return function(context)
     toggle(keeper,"KeeperAutoTackle","Auto tackle")
     slider(keeper,"KeeperTackleRange","Tackle range",4,24)
     slider(keeper,"KeeperReaction","Reaction lead",.05,.45,.01)
+    slider(keeper,"KeeperContactLead","Tackle reaction lead",0,.45,.01)
     toggle(keeper,"KeeperDiveOnContact","Dive on contact")
     slider(keeper,"KeeperDiveRange","Dive range",5,18,.5)
     local items=combat:Section({Name="Items",Side=2})
@@ -453,7 +455,7 @@ local config = {
     SkeletonColor=Color3.fromRGB(65,155,255),TracerColor=Color3.fromRGB(65,155,255),ChamsColor=Color3.fromRGB(65,155,255),
     GlowColor=Color3.fromRGB(65,155,255),ShaderColor=Color3.fromRGB(65,155,255),ShotColor=Color3.fromRGB(65,155,255),
     LandingColor=Color3.fromRGB(103,227,198),ProjectileColor=Color3.fromRGB(255,130,90),ItemBoxColor=Color3.fromRGB(190,156,255),ItemFOVColor=Color3.new(1,1,1),
-    ShotAimbot = false, ShotPlacement = "Auto", TargetPost = "Automatic",
+    ShotAimbot = false, ShotPlacement = "Auto", TargetPost = "Automatic", ShootRange = 110,
     UnsavableShot = false, PerfectCharge = false, AutoPass = false,
     ShotCurve = 0, FeintShot = false, FeintChance = 50, FlickShot = false, KeeperAutoTackle = false, KeeperTackleRange = 12,
     KeeperDiveOnContact = true, KeeperDiveRange = 10,
@@ -468,7 +470,7 @@ local config = {
     ShowTeammates = true, ItemAimbot = false, ItemAimFOV = 180,
     ShowItemFOV = false, AutoUseItem = false, TackleRange = 15,
     DribbleRange = 14, MagnetRange = 14, MagnetStealRange = 3.2, PassRange = 100,
-    CallInterval = 2.5, KeeperReaction = 0.18,
+    CallInterval = 2.5, KeeperReaction = 0.18, KeeperContactLead = 0.12,
     EnemyColor = Color3.fromRGB(250, 109, 129),
     TeamColor = Color3.fromRGB(103, 191, 255),
     BallColor = Color3.fromRGB(255, 218, 116),
@@ -693,6 +695,14 @@ local function shot_clearance()
     return math.max(modules.Physics.BallRadius + 3, config.ShotMargin + 1.5)
 end
 
+local function within_shoot_range(goal)
+    goal=goal or goal_for(false)
+    local root=local_root()
+    if not goal or not root then return false end
+    local offset=goal.Position-root.Position
+    return Vector3.new(offset.X,0,offset.Z).Magnitude<=config.ShootRange
+end
+
 local function safe_shot_target(target, mouth)
     if not mouth then return target end
     local clearance = shot_clearance()
@@ -707,7 +717,7 @@ end
 local function select_shot()
     local goal,team=goal_for(false)
     local root=local_root()
-    if not goal or not root then return nil end
+    if not goal or not root or not within_shoot_range(goal) then return nil end
     local mouth=get_mouth(goal)
     if not mouth then return nil end
     local clearance=shot_clearance()
@@ -801,7 +811,7 @@ end
 local function select_flick_shot()
     local goal,team=goal_for(false)
     local root=local_root()
-    if not goal or not root then return nil end
+    if not goal or not root or not within_shoot_range(goal) then return nil end
     local mouth=get_mouth(goal)
     if not mouth then return nil end
     local keeper
@@ -885,6 +895,7 @@ end
 
 local function shot_curve()
     if state.MagnetSteal then return nil end
+    if not within_shoot_range() then return nil end
     if config.ShotCurve == 0 then return nil end
     return math.clamp(config.ShotCurve / 100, -1, 1)
 end
@@ -893,13 +904,14 @@ local feint_random = Random.new()
 
 local function begin_shot_feint()
     state.FeintCommitted = false
-    state.FeintActive = config.FeintShot and feint_random:NextNumber() < math.clamp(config.FeintChance, 0, 100) / 100
+    state.FeintActive = config.FeintShot and within_shoot_range() and feint_random:NextNumber() < math.clamp(config.FeintChance, 0, 100) / 100
     state.FeintSide = state.FeintActive and (feint_random:NextInteger(0, 1) == 0 and -1 or 1) or nil
     state.FeintSwitchAt = os.clock() + feint_random:NextNumber(.16,.25)
     state.ShotSolution = nil
 end
 
 local function shot_target()
+    if not within_shoot_range() then return nil end
     if state.FlickVolley and state.FlickShotTarget then return state.FlickShotTarget end
     if not config.FeintShot or not state.FeintActive then return state.ShotTarget end
     local goal = state.TargetGoal or goal_for(false)
@@ -916,7 +928,7 @@ end
 
 local function begin_shot_flick()
     state.FlickAttemptAt=os.clock()
-    if not config.FlickShot or state.FlickVolley or not can_act() or not owns_ball()or is_goalkeeper()then return false end
+    if not config.FlickShot or state.FlickVolley or not can_act() or not owns_ball()or is_goalkeeper()or not within_shoot_range()then return false end
     if not modules.Controls.IsRainbowFlickUnlocked()or modules.Controls.IsOnCooldown("RainbowFlick")then return false end
     if not state.NativeFlick then
         for _,callback in ipairs(getgc(true))do
@@ -1263,7 +1275,7 @@ local function install_hooks()
     patch(modules.ClientShoot, "HandleInputEnded", function(original)
         return function(input, ...)
             if is_goalkeeper()then return original(input,...)end
-            if (config.PerfectCharge or config.UnsavableShot) and not state.ReleasingPerfect and state.ShotInput == input and modules.ClientShoot.IsCharging() then
+            if within_shoot_range() and (config.PerfectCharge or config.UnsavableShot) and not state.ReleasingPerfect and state.ShotInput == input and modules.ClientShoot.IsCharging() then
                 return true
             end
             if state.ShotInput == input then state.FeintCommitted = true state.ShotInput = nil end
@@ -1609,7 +1621,7 @@ local function update_prediction()
                 local center=Vector3.new(plane.X,(mouth.BottomY+mouth.TopY)*.5,plane.Z)
                 local box={CFrame=CFrame.lookAt(center,center+mouth.Forward),Size=Vector3.new(mouth.HalfWidth*2+2,mouth.TopY-mouth.BottomY+2,.8)}
                 local position,time=modules.Physics.GetFirstBoxEntry(current,boundary,box,now,2.5,false)
-                if position and time then state.Crossing={Position=position,Time=time}end
+                if position and time then state.Crossing={Position=position,Time=time,Box=box}end
             end
         end
     end
@@ -1641,29 +1653,31 @@ local function keeper_step()
         and not modules.Tackle.IsSlideTackling()then
         local zone=goal.Parent and goal.Parent:FindFirstChild("Goalkeeper")
         local nearest,nearestDistance=nil,config.KeeperDiveRange
+        local ball=modules.Renderer.GetPosition()
         for _,actor in ipairs(state.Actors)do
             if actor.UserId==carrier and not actor.Friendly and actor.Root.Parent and actor.Character.Parent
-                and not actor.Character:GetAttribute("Ragdolled")then
+                and not actor.Character:GetAttribute("Ragdolled")
+                and (not ball or (ball-actor.Root.Position).Magnitude<=6)then
+                local predicted=actor.Root.Position+actor.Root.AssemblyLinearVelocity*config.KeeperContactLead
                 local inside=false
                 if zone and zone:IsA("BasePart")then
-                    local p=zone.CFrame:PointToObjectSpace(actor.Root.Position)
+                    local p=zone.CFrame:PointToObjectSpace(predicted)
                     inside=math.abs(p.X)<=zone.Size.X*.5 and math.abs(p.Z)<=zone.Size.Z*.5
                         and math.abs(p.Y)<=zone.Size.Y*.5+4
                 else
-                    local relative=actor.Root.Position-mouth.PlanePosition
+                    local relative=predicted-mouth.PlanePosition
                     inside=math.abs(relative:Dot(mouth.Lateral))<=mouth.HalfWidth+30
                         and math.abs(relative:Dot(mouth.Forward))<=35
                 end
                 if inside then
-                    local delta=actor.Root.Position-root.Position
+                    local delta=predicted-root.Position
                     local distance=Vector3.new(delta.X,0,delta.Z).Magnitude
-                    if distance<nearestDistance then nearest,nearestDistance=actor,distance end
+                    if distance<nearestDistance then nearest,nearestDistance=predicted,distance end
                 end
             end
         end
         if nearest then
-            local predicted=nearest.Root.Position+nearest.Root.AssemblyLinearVelocity*.08
-            local direction=flat(predicted-root.Position)
+            local direction=flat(nearest-root.Position)
             if direction and os.clock()>=(state.KeeperNextDiveAt or 0)then
                 attempt_keeper_dive(direction)
                 return true
@@ -1671,8 +1685,9 @@ local function keeper_step()
         end
     end
     if not crossing then return false end
+    if carrier then state.Crossing=nil return false end
     local remaining=crossing.Time-modules.Clock.GetSmoothedServerTime()
-    if remaining<=0 then return true end
+    if remaining<=0 then state.Crossing=nil return false end
     local delta=crossing.Position-root.Position
     local horizontal=Vector3.new(delta.X,0,delta.Z)
     local distance=horizontal.Magnitude
@@ -1685,6 +1700,24 @@ local function keeper_step()
         return true
     end
     if remaining>threshold then
+        if distance>2 then state.MoveDirection=flat(delta)end
+        return true
+    end
+    local ball_state,boundary=modules.Renderer.GetAuthoritativeMovementState()
+    local now=modules.Clock.GetSmoothedServerTime()
+    if not ball_state or not boundary or modules.Renderer.GetOwnedUserId()then state.Crossing=nil return false end
+    local current=modules.Physics.GetStateAtTime(ball_state,now,boundary)
+    if not current or current.Velocity:Dot(mouth.Forward)>=-.1 then state.Crossing=nil return false end
+    local position,time=modules.Physics.GetFirstBoxEntry(current,boundary,crossing.Box,now,2.5,false)
+    if not position or not time then state.Crossing=nil return false end
+    crossing.Position,crossing.Time=position,time
+    delta=position-root.Position
+    horizontal=Vector3.new(delta.X,0,delta.Z)
+    distance=horizontal.Magnitude
+    remaining=time-now
+    travel=modules.Dive.GetCurveSecondsForTravel(math.clamp(distance-contact,0,reach),reach)
+    threshold=travel+config.KeeperReaction+.05
+    if distance>reach+contact or remaining>threshold then
         if distance>2 then state.MoveDirection=flat(delta)end
         return true
     end
@@ -1818,7 +1851,7 @@ local function automation_step()
         modules.Sprint.ToggleSprintButton()
         state.OwnedSprintToggle = true
     end
-    if (config.PerfectCharge or config.UnsavableShot or state.AutoShot) and state.ShotInput and modules.ClientShoot.IsCharging() then
+    if within_shoot_range() and (config.PerfectCharge or config.UnsavableShot or state.AutoShot) and state.ShotInput and modules.ClientShoot.IsCharging() then
         if (modules.ClientShoot.GetFullChargeProgress() or 0) >= 1 then
             state.FullChargeAt = state.FullChargeAt or os.clock()
         end
@@ -1831,6 +1864,13 @@ local function automation_step()
         end
     elseif not modules.ClientShoot.IsCharging() then
         state.AutoShot = false
+    else
+        state.FullChargeAt = nil
+        if state.AutoShot and not within_shoot_range() then
+            modules.ClientShoot.CancelCharge()
+            state.AutoShot = false
+            state.ShotInput = nil
+        end
     end
     if state.FlickVolley and not modules.ClientShoot.IsCharging() and not state.AutoShot
         and os.clock()-(state.FlickVolleyStartedAt or 0)>.3 then
@@ -1891,7 +1931,7 @@ local function automation_step()
                 state.FlickVolley=false state.FlickShotTarget=nil state.FlickGoal=nil state.AutoShot=false
             end
         end
-        if config.AutoVolley and not state.FlickVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.18) then
+        if config.AutoVolley and within_shoot_range() and not state.FlickVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.18) then
             if modules.Volley.IsAvailable(local_player.Character) then
                 state.ShotInput = modules.Controls.CreateInput("Kick")
                 state.AutoShot = true
