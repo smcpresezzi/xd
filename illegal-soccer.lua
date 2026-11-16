@@ -542,6 +542,8 @@ local modules = {
     Pass = module("Client.Gameplay.Actions.Pass"),
     Volley = module("Client.Gameplay.Actions.VolleyOpportunity"),
     Dodge = module("Client.Gameplay.Actions.Dodge"),
+    DodgeAction = module("Modules.Actions.Dodge"),
+    SlideTackle = module("Modules.Actions.SlideTackle"),
     Tackle = module("Client.Gameplay.Actions.SlideTackleInput"),
     Call = module("Client.Gameplay.Actions.CallForPass"),
     Sprint = module("Client.Gameplay.Player.Sprint"),
@@ -705,7 +707,7 @@ end
 
 local function safe_shot_target(target, mouth)
     if not mouth then return target end
-    local clearance = shot_clearance()
+    local clearance = math.min(shot_clearance(),math.max(0,mouth.HalfWidth-.25),math.max(0,(mouth.TopY-mouth.BottomY)*.5-.25))
     local width = math.max(0, mouth.HalfWidth - clearance)
     local low = mouth.BottomY + clearance
     local high = math.max(low, mouth.TopY - clearance)
@@ -720,7 +722,7 @@ local function select_shot()
     if not goal or not root or not within_shoot_range(goal) then return nil end
     local mouth=get_mouth(goal)
     if not mouth then return nil end
-    local clearance=shot_clearance()
+    local clearance=math.min(shot_clearance(),math.max(0,mouth.HalfWidth-.25),math.max(0,(mouth.TopY-mouth.BottomY)*.5-.25))
     local width=math.max(0,mouth.HalfWidth-clearance)
     local low=mouth.BottomY+clearance
     local high=math.max(low,mouth.TopY-clearance)
@@ -869,6 +871,25 @@ local function enemy_near(position, distance)
     return best, distance
 end
 
+local function dribble_threat(root,actor)
+    local until_time=modules.SlideTackle.GetSlidingUntil(actor.Character)
+    if not until_time then return nil end
+    local age=modules.SlideTackle.Constants.TotalMotionSeconds-(until_time-workspace:GetServerTimeNow())
+    if age>modules.SlideTackle.Constants.HitboxDelaySeconds+modules.SlideTackle.Constants.HitboxSeconds then return nil end
+    local delta=root.Position-actor.Root.Position
+    local horizontal=Vector3.new(delta.X,0,delta.Z)
+    local distance=horizontal.Magnitude
+    if distance>config.DribbleRange or distance<.01 then return nil end
+    local velocity=actor.Root.AssemblyLinearVelocity
+    local direction=flat(velocity)
+    if not direction or velocity.Magnitude<3 then direction=flat(actor.Root.CFrame.LookVector)end
+    if not direction or direction:Dot(horizontal.Unit)<.45 then return nil end
+    local closing=math.max(0,velocity:Dot(horizontal.Unit))
+    local predicted=math.max(0,distance-closing*.22)
+    if predicted>math.min(config.DribbleRange,8) then return nil end
+    return horizontal.Unit, predicted
+end
+
 local function item_target()
     local camera = workspace.CurrentCamera
     local root = local_root()
@@ -906,7 +927,6 @@ local function begin_shot_feint()
     state.FeintCommitted = false
     state.FeintActive = config.FeintShot and within_shoot_range() and feint_random:NextNumber() < math.clamp(config.FeintChance, 0, 100) / 100
     state.FeintSide = state.FeintActive and (feint_random:NextInteger(0, 1) == 0 and -1 or 1) or nil
-    state.FeintSwitchAt = os.clock() + feint_random:NextNumber(.16,.25)
     state.ShotSolution = nil
 end
 
@@ -917,13 +937,11 @@ local function shot_target()
     local goal = state.TargetGoal or goal_for(false)
     local mouth = goal and get_mouth(goal)
     if not mouth then return state.ShotTarget end
-    local clearance = shot_clearance()
-    local width = math.max(0, mouth.HalfWidth - clearance)
-    local blend=math.clamp((os.clock()-(state.FeintSwitchAt or 0))/.15,0,1)
-    blend=blend*blend*(3-2*blend)
-    if state.FeintCommitted then blend=1 end
-    local position = mouth.PlanePosition + mouth.Lateral * ((state.FeintSide or 1) * width * (1-2*blend))
-    return safe_shot_target(Vector3.new(position.X, math.max(mouth.BottomY + clearance, mouth.TopY - clearance), position.Z), mouth)
+    local width = math.max(0, mouth.HalfWidth - shot_clearance())
+    local side=state.FeintCommitted and -(state.FeintSide or 1) or (state.FeintSide or 1)
+    local position = mouth.PlanePosition + mouth.Lateral * side * width * .7
+    local height=(mouth.BottomY+mouth.TopY)*.5
+    return safe_shot_target(Vector3.new(position.X,height,position.Z), mouth)
 end
 
 local function begin_shot_flick()
@@ -1073,11 +1091,18 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
             local yaw = math.atan2(aim.Direction.Z, aim.Direction.X)
             local pitch = math.asin(math.clamp(aim.Direction.Y, -1, 1))
             local best
+            local safeWidth=math.max(0,mouth.HalfWidth-modules.Physics.BallRadius-.5)
+            local safeBottom=mouth.BottomY+modules.Physics.BallRadius+.5
+            local safeTop=mouth.TopY-modules.Physics.BallRadius-.5
+            local function inside(sample)
+                return sample and math.abs((sample.Crossing-mouth.PlanePosition):Dot(mouth.Lateral))<=safeWidth
+                    and sample.Crossing.Y>=safeBottom and sample.Crossing.Y<=safeTop
+            end
             for _ = 1, 9 do
                 local sample = evaluate(yaw, pitch)
                 if not sample then break end
-                if not best or sample.Loss < best.Loss then best = sample end
-                if sample.Loss < .0225 then break end
+                if inside(sample) and (not best or sample.Loss < best.Loss) then best = sample end
+                if inside(sample) and sample.Loss < .0225 then break end
                 local dx = evaluate(yaw + .01, pitch)
                 local dy = evaluate(yaw, pitch + .01)
                 if not dx or not dy then break end
@@ -1087,6 +1112,14 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
                 if math.abs(determinant) < .001 then break end
                 yaw -= math.clamp((sample.X*yy-sample.Y*xy)/determinant, -.15, .15)
                 pitch = math.clamp(pitch-math.clamp((sample.Y*xx-sample.X*yx)/determinant, -.12, .12), -.4, 1.2)
+            end
+            if not best then
+                for _,yawOffset in ipairs({0,-.02,.02,-.05,.05,-.1,.1})do
+                    for _,pitchOffset in ipairs({0,-.03,.03,-.07,.07})do
+                        local sample=evaluate(yaw+yawOffset,pitch+pitchOffset)
+                        if inside(sample) and (not best or sample.Loss<best.Loss)then best=sample end
+                    end
+                end
             end
             if best and not post_retry then
                 local ok,actual=pcall(modules.Physics.GetStateAtTime,best.Ball,best.Time,boundary)
@@ -1101,10 +1134,13 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
                     if (fallback-target).Magnitude>.1 then
                         return solve_shot(fallback,charge,is_throw,initial_aim,true)
                     end
+                    return nil
                 end
             end
             if best then
                 aim, velocity, origin, direction = best.Aim, best.Velocity, best.Origin, best.Direction
+            else
+                return nil
             end
         end
     end
@@ -1123,7 +1159,7 @@ end
 local function aim_payload(original)
     if not state.Alive or not can_act() then return original end
     if state.MagnetSteal then
-        local target=modules.Renderer.GetPosition()
+        local target=state.MagnetStealTarget or modules.Renderer.GetPosition()
         local origin=original and original.Origin or workspace.CurrentCamera.CFrame.Position
         if target and (target-origin).Magnitude>.01 then
             local result=table.clone(original or {})
@@ -1239,7 +1275,7 @@ local function install_hooks()
             return function(command, ...)
                 if type(command)=="table" and command.PassType=="Shot" then
                     if name=="Start" and not state.MagnetSteal then begin_shot_feint() end
-                    if name=="Release" then state.FeintCommitted=true end
+                    if name=="LockAim" or name=="Release" then state.FeintCommitted=true end
                 end
                 guarded("command aim", rewrite_command, command)
                 if name=="Release"and type(command)=="table"and command.PassType=="Shot"then
@@ -1321,6 +1357,7 @@ local function install_hooks()
         return function(character, ...)
             if character == local_player.Character then
                 if state.TackleDirection then return state.TackleDirection end
+                if state.DribbleDirection then return state.DribbleDirection end
                 if state.MoveDirection then
                     local manual=original(character,...)
                     if typeof(manual)=="Vector3"and manual.Magnitude>.05 then return manual end
@@ -1727,30 +1764,64 @@ local function keeper_step()
     return true
 end
 
-local function magnet_kick(owner,position,root)
+local function magnet_ball_velocity(owner,position)
+    local now=os.clock()
+    local velocity
+    if state.MagnetBallOwner==owner and state.MagnetBallPosition and state.MagnetBallAt then
+        local elapsed=now-state.MagnetBallAt
+        if elapsed>=.03 and elapsed<=.25 then
+            local observed=(position-state.MagnetBallPosition)/elapsed
+            if observed.Magnitude<70 then velocity=observed end
+        end
+    end
+    state.MagnetBallOwner=owner
+    state.MagnetBallPosition=position
+    state.MagnetBallAt=now
+    return velocity
+end
+
+local function magnet_intercept(position,root,enemy,ball_velocity,lead)
+    local carrier_velocity=enemy.Root.AssemblyLinearVelocity
+    local horizontal=Vector3.new(carrier_velocity.X,0,carrier_velocity.Z)
+    if horizontal.Magnitude>35 then horizontal=horizontal.Unit*35 end
+    local observed=ball_velocity and Vector3.new(ball_velocity.X,0,ball_velocity.Z) or horizontal
+    local velocity=horizontal*.7+observed*.3
+    local local_velocity=root.AssemblyLinearVelocity
+    local local_horizontal=Vector3.new(local_velocity.X,0,local_velocity.Z)
+    if local_horizontal.Magnitude>35 then local_horizontal=local_horizontal.Unit*35 end
+    local target=position+velocity*lead
+    local future_root=root.Position+local_horizontal*lead
+    return target,target-future_root
+end
+
+local function magnet_kick(owner,position,root,enemy,ball_velocity)
     if not owner or owner==local_player.UserId or is_goalkeeper()or state.MagnetStealInput
         or modules.ClientShoot.IsCharging()or modules.Pass.IsCharging()then return end
-    local enemy
-    for _,actor in ipairs(state.Actors)do
-        if actor.UserId==owner and not actor.Friendly then enemy=actor break end
-    end
+    if enemy.Character:GetAttribute("Ragdolled") or modules.DodgeAction.IsDribbling(enemy.Character)
+        or modules.SlideTackle.GetSlidingUntil(enemy.Character)then return end
     local offset=position-root.Position
     local horizontal=Vector3.new(offset.X,0,offset.Z)
-    if not enemy or offset.Magnitude>config.MagnetStealRange
-        or horizontal.Magnitude>config.MagnetStealRange-.4 or math.abs(offset.Y)>2.25 then return end
-    if horizontal.Magnitude>.01 and root.CFrame.LookVector:Dot(horizontal.Unit)<.65 then return end
-    if not ready("magnet kick",.8)then return end
+    local target,predicted=magnet_intercept(position,root,enemy,ball_velocity,modules.KickCore.Constants.MinimumChargeSeconds+.02)
+    local predicted_horizontal=Vector3.new(predicted.X,0,predicted.Z)
+    if offset.Magnitude>config.MagnetStealRange+.8 or predicted_horizontal.Magnitude>config.MagnetStealRange
+        or math.abs(offset.Y)>2.25 or math.abs(predicted.Y)>2.5 then return end
+    if horizontal.Magnitude>.01 and root.CFrame.LookVector:Dot(horizontal.Unit)<.55 then return end
+    if predicted_horizontal.Magnitude>.01 and root.CFrame.LookVector:Dot(predicted_horizontal.Unit)<.5 then return end
+    if os.clock()<(state.NextMagnetKickAt or 0)then return end
     local input=modules.Controls.CreateInput("Kick")
     state.MagnetSteal=true
+    state.MagnetStealTarget=target
     state.MagnetStealAttemptAt=os.clock()
     state.MagnetStealAttemptDistance=offset.Magnitude
     guarded("magnet kick",modules.ClientShoot.HandleInputBegan,input,false)
     if modules.ClientShoot.IsCharging()then
+        state.NextMagnetKickAt=os.clock()+.8
         state.MagnetStealChargedAt=os.clock()
         state.MagnetStealInput=input
-        state.MagnetStealReleaseAt=os.clock()+.18
+        state.MagnetStealReleaseAt=os.clock()+modules.KickCore.Constants.MinimumChargeSeconds+.03
     else
-        state.MagnetSteal=false state.ShotInput=nil
+        state.NextMagnetKickAt=os.clock()+.12
+        state.MagnetSteal=false state.MagnetStealTarget=nil state.ShotInput=nil
     end
 end
 
@@ -1777,9 +1848,11 @@ local function magnet_step()
         end
         if not enemy then state.MagnetDirection=nil return end
         state.MagnetDirection=nil
-        local toward=flat(position-root.Position)
+        local velocity=magnet_ball_velocity(owner,position)
+        local predicted=magnet_intercept(position,root,enemy,velocity,.18)
+        local toward=flat(predicted-root.Position)
         if toward then state.MoveDirection=toward end
-        magnet_kick(owner,position,root)
+        magnet_kick(owner,position,root,enemy,velocity)
         return
     end
     local predicted=position
@@ -1804,12 +1877,19 @@ local function automation_step()
         if modules.ClientShoot.IsCharging()then
             local root=local_root()
             local ball=modules.Renderer.GetPosition()
+            local owner=modules.Renderer.GetOwnedUserId()
+            local enemy
+            for _,actor in ipairs(state.Actors)do
+                if actor.UserId==owner and not actor.Friendly then enemy=actor break end
+            end
             local offset=root and ball and ball-root.Position
             local horizontal=offset and Vector3.new(offset.X,0,offset.Z)
             local aligned=horizontal and horizontal.Magnitude>.01
-                and root.CFrame.LookVector:Dot(horizontal.Unit)>=.4
-            if config.BallMagnet and not owns_ball()and offset
-                and offset.Magnitude<=config.MagnetStealRange+.6 and aligned then
+                and root.CFrame.LookVector:Dot(horizontal.Unit)>=.5
+            if config.BallMagnet and enemy and not modules.DodgeAction.IsDribbling(enemy.Character)
+                and not modules.SlideTackle.GetSlidingUntil(enemy.Character) and not owns_ball()and offset
+                and offset.Magnitude<=config.MagnetStealRange+.4 and math.abs(offset.Y)<=2.5 and aligned then
+                state.MagnetStealTarget=magnet_intercept(ball,root,enemy,nil,.04)
                 state.ReleasingPerfect=true
                 guarded("magnet kick release",modules.ClientShoot.HandleInputEnded,input)
                 state.MagnetStealReleasedAt=os.clock()
@@ -1818,7 +1898,7 @@ local function automation_step()
                 guarded("magnet kick cancel",modules.ClientShoot.CancelCharge)
             end
         end
-        state.MagnetStealInput=nil state.MagnetSteal=false
+        state.MagnetStealInput=nil state.MagnetSteal=false state.MagnetStealTarget=nil
         state.MagnetStealCooldownUntil=os.clock()+.35
     end
     if config.SpeedBoost then modules.Movement.SetMultiplier("AxisSoccerSpeed",{WalkSpeed=config.SpeedMultiplier})
@@ -1897,13 +1977,20 @@ local function automation_step()
     if has_ball then
         if config.AutoDribble and not state.FlickPending and not is_goalkeeper()and not modules.Dodge.IsDribbling()
             and not modules.ClientShoot.IsCharging()and not modules.Pass.IsCharging()
-            and state.PossessionSince and os.clock()-state.PossessionSince>.35 then
-            local enemy=enemy_near(root.Position,math.min(config.DribbleRange,11))
-            if enemy then
-                local toward=flat(enemy.Root.Position-root.Position)
-                if toward and root.CFrame.LookVector:Dot(toward)>.2 and ready("dribble",2.5)then
-                    modules.Dodge.HandleInputBegan(modules.Controls.CreateInput("Dribble"),false)
+            and state.PossessionSince and os.clock()-state.PossessionSince>.12 then
+            local threat,nearest=nil,math.huge
+            for _,enemy in ipairs(state.Actors)do
+                if not enemy.Friendly and enemy.Root.Parent and enemy.Character.Parent
+                    and not enemy.Character:GetAttribute("Ragdolled")then
+                    local direction,distance=dribble_threat(root,enemy)
+                    if direction and distance<nearest then threat,nearest=direction,distance end
                 end
+            end
+            if threat and os.clock()>=(state.NextDribbleAt or 0)then
+                state.DribbleDirection=Vector3.new(-threat.Z,0,threat.X)
+                guarded("auto dribble",modules.Dodge.HandleInputBegan,modules.Controls.CreateInput("Dribble"),false)
+                state.DribbleDirection=nil
+                state.NextDribbleAt=os.clock()+(modules.Dodge.IsDribbling()and modules.DodgeAction.Constants.RepeatDelaySeconds or .12)
             end
         end
         if config.AutoPass and not state.FlickPending and not state.PassInput and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dodge.IsDribbling() and ready("pass", 1.1) then
@@ -1973,7 +2060,8 @@ local function unload()
     pcall(modules.Movement.ClearServerRagdollSuppression,"AxisSoccer")
     if player_visuals then pcall(player_visuals.Cleanup)end
     for _, connection in state.Connections do connection:Disconnect() end
-    state.MoveDirection, state.DiveDirection, state.TackleDirection = nil, nil, nil
+    state.MoveDirection, state.DiveDirection, state.TackleDirection, state.DribbleDirection = nil, nil, nil, nil
+    state.MagnetStealTarget=nil
     if state.AutoShot then pcall(modules.ClientShoot.CancelCharge) end
     if state.MagnetStealInput then pcall(modules.ClientShoot.CancelCharge) end
     if state.PassInput then pcall(modules.Pass.CancelCharge) end
@@ -2001,7 +2089,7 @@ local function set_config(key,value)
         state.FlickGoal=nil state.FlickJiggleSide=nil
     end
     if key=="AutoPass"and not value then state.PassTarget=nil end
-    if key=="BallMagnet"and not value then state.MagnetDirection=nil end
+    if key=="BallMagnet"and not value then state.MagnetDirection=nil state.MagnetStealTarget=nil end
     if key=="AutoGoalkeeper"and not value then state.DiveDirection=nil state.MoveDirection=nil end
     if key=="ShotCurve" or key=="FeintShot" then state.ShotSolution=nil end
     if key=="FeintShot" and not value then state.FeintActive, state.FeintSide = false, nil end
@@ -2026,7 +2114,7 @@ env.AxisIllegalSoccer={
         local control=ui_controls[key]
         if control then control:Set(value)else set_config(key,value)end
     end,
-    SolveShot=solve_shot,SelectShot=select_shot,PredictShotCrossing=predict_shot_crossing,
+    SolveShot=solve_shot,SelectShot=select_shot,GetShotTarget=shot_target,PredictShotCrossing=predict_shot_crossing,
 }
 
 local ok, err = xpcall(function()
@@ -2068,8 +2156,9 @@ local ok, err = xpcall(function()
         state.FeintActive, state.FeintSide, state.FeintSwitchAt = false, nil, nil
         state.FlickPending=nil state.FlickVolley=false state.FlickShotTarget=nil
         state.FlickGoal=nil state.FlickJiggleSide=nil state.PossessionSince=nil
-        state.MagnetSteal=false state.MagnetStealInput=nil
-        state.MagnetDirection=nil
+        state.MagnetSteal=false state.MagnetStealInput=nil state.MagnetStealTarget=nil
+        state.MagnetDirection=nil state.MagnetBallPosition=nil state.MagnetBallOwner=nil state.NextMagnetKickAt=nil
+        state.DribbleDirection=nil state.NextDribbleAt=nil
         table.clear(state.Points)
     end)
 end,function(message)return tostring(message)end)
