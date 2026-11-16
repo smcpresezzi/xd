@@ -12,11 +12,12 @@ return function(context)
     library.MenuKeybind=tostring(Enum.KeyCode.RightShift)
     local window=library:Window({Name="",SubName="",Logo=getcustomasset(logo),Wordmark=true})
     local controls={}
+    local bindsReady=false
     local bound={ShotAimbot=true,AutoGoalkeeper=true,BallMagnet=true,SpeedBoost=true,ItemAimbot=true}
     local function toggle(section,key,name,color)
         local control=section:Toggle({Name=name,Flag="IS_"..key,Default=config[key],Callback=function(value)context.Set(key,value)end})
         controls[key]=control
-        if bound[key]then control:GetBind({Flag="IS_"..key.."Key",Default=Enum.KeyCode.Backspace,Mode="Toggle",Callback=function(value)control:Set(value)end})end
+        if bound[key]then control:GetBind({Flag="IS_"..key.."Key",Default=Enum.KeyCode.Backspace,Mode="Toggle",Callback=function(value)if bindsReady and not library.RestoringConfig then control:Set(value)end end})end
         if color then control:Colorpicker({Flag="IS_"..color,Default=config[color],Alpha=1,Callback=function(value)config[color]=value end})end
         return control
     end
@@ -36,6 +37,7 @@ return function(context)
     slider(shots,"ShotMargin","Post clearance",1.5,4,.1)
     toggle(shots,"UnsavableShot","Unsavable shot")
     toggle(shots,"PerfectCharge","Perfect charge")
+    toggle(shots,"FlickShot","Flick shot")
     slider(shots,"ShotCurve","Curve",-100,100)
     toggle(shots,"FeintShot","Feint shot")
     slider(shots,"FeintChance","Feint chance (%)",0,100)
@@ -58,6 +60,8 @@ return function(context)
     toggle(keeper,"KeeperAutoTackle","Auto tackle")
     slider(keeper,"KeeperTackleRange","Tackle range",4,24)
     slider(keeper,"KeeperReaction","Reaction lead",.05,.45,.01)
+    toggle(keeper,"KeeperDiveOnContact","Dive on contact")
+    slider(keeper,"KeeperDiveRange","Dive range",5,18,.5)
     local items=combat:Section({Name="Items",Side=2})
     toggle(items,"ItemAimbot","Item aim")
     slider(items,"ItemAimFOV","Aim FOV",30,500)
@@ -128,7 +132,59 @@ return function(context)
     context.Connect(window.Items.MainFrame.Instance:GetPropertyChangedSignal("Visible"),function()
         for gui,button in pairs(blockers)do updateBlocker(gui,button)end
     end)
+    if game:GetService("UserInputService").TouchEnabled then
+        local mobile=Instance.new("ScreenGui")
+        mobile.Name="AxisSoccerMobile"
+        mobile.ResetOnSpawn=false
+        mobile.IgnoreGuiInset=false
+        mobile.DisplayOrder=150
+        mobile.Parent=playerGui
+        state.MobileGui=mobile
+        local dock=Instance.new("Frame")
+        dock.AnchorPoint=Vector2.new(1,0)
+        dock.Position=UDim2.new(1,-12,0,70)
+        dock.Size=UDim2.fromOffset(260,42)
+        dock.BackgroundColor3=library.Theme.Background
+        dock.BorderSizePixel=0
+        dock.Parent=mobile
+        local layout=Instance.new("UIListLayout")
+        layout.FillDirection=Enum.FillDirection.Horizontal
+        layout.HorizontalAlignment=Enum.HorizontalAlignment.Center
+        layout.VerticalAlignment=Enum.VerticalAlignment.Center
+        layout.Padding=UDim.new(0,4)
+        layout.Parent=dock
+        local buttons={}
+        for _,entry in ipairs({{"ShotAimbot","Aim"},{"FlickShot","Flick"},{"AutoGoalkeeper","Keeper"},{"BallMagnet","Magnet"}})do
+            local key,label=entry[1],entry[2]
+            local button=Instance.new("TextButton")
+            button.Name=key
+            button.Size=UDim2.fromOffset(61,34)
+            button.BackgroundColor3=library.Theme.Element
+            button.BorderSizePixel=0
+            button.TextColor3=library.Theme.Text
+            button.TextSize=12
+            button.Font=Enum.Font.GothamMedium
+            button.Text=label
+            button.Parent=dock
+            buttons[key]={Button=button,Label=label}
+            context.Connect(button.Activated,function()
+                local control=controls[key]
+                if control then control:Set(not config[key])end
+            end)
+        end
+        local elapsed=0
+        context.Connect(game:GetService("RunService").Heartbeat,function(dt)
+            elapsed+=dt
+            if elapsed<.2 then return end
+            elapsed=0
+            for key,entry in pairs(buttons)do
+                entry.Button.BackgroundColor3=config[key]and library.Theme.Accent or library.Theme.Element
+                entry.Button.Text=entry.Label
+            end
+        end)
+    end
     window:Init()
+    bindsReady=true
     return {Library=library,Window=window,Controls=controls}
 end
 ]=],
@@ -358,7 +414,11 @@ local previous_config = env.AxisIllegalSoccer and table.clone(env.AxisIllegalSoc
 if env.AxisIllegalSoccer then
     env.AxisIllegalSoccer.Unload()
 end
-assert(game.PlaceId == 126987974021910, "Illegal Soccer: unsupported place")
+assert(game.GameId == 10155360168, "Illegal Soccer: unsupported universe")
+local queue_teleport = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+if queue_teleport then
+    pcall(queue_teleport, 'loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/5f4d88230f244edad4322df84b85dc0f.lua"))()')
+end
 
 local players = game:GetService("Players")
 local run_service = game:GetService("RunService")
@@ -394,7 +454,8 @@ local config = {
     LandingColor=Color3.fromRGB(103,227,198),ProjectileColor=Color3.fromRGB(255,130,90),ItemBoxColor=Color3.fromRGB(190,156,255),ItemFOVColor=Color3.new(1,1,1),
     ShotAimbot = false, ShotPlacement = "Auto", TargetPost = "Automatic",
     UnsavableShot = false, PerfectCharge = false, AutoPass = false,
-    ShotCurve = 0, FeintShot = false, FeintChance = 50, KeeperAutoTackle = false, KeeperTackleRange = 12,
+    ShotCurve = 0, FeintShot = false, FeintChance = 50, FlickShot = false, KeeperAutoTackle = false, KeeperTackleRange = 12,
+    KeeperDiveOnContact = true, KeeperDiveRange = 10,
     AutoVolley = false, TackleAimbot = false, AutoTackle = false,
     AutoDribble = false, AutoGoalkeeper = false, KeeperClearAimbot = false,
     AutoCallForPass = false, AutoSprint = false, InfiniteStamina = false,
@@ -416,6 +477,21 @@ local config = {
 if previous_config then
     for key, value in previous_config do
         if typeof(value) == typeof(config[key]) then config[key] = value end
+    end
+end
+local autosave_path="Axis/Config/"..tostring(game.GameId).."/autosave.json"
+if isfile and readfile and isfile(autosave_path)then
+    local ok,saved=pcall(function()return http_service:JSONDecode(readfile(autosave_path))end)
+    if ok and type(saved)=="table"then
+        for key,default in pairs(config)do
+            local value=saved["IS_"..key]
+            if typeof(value)==typeof(default)then
+                config[key]=value
+            elseif typeof(default)=="Color3"and type(value)=="table"and type(value.Color)=="string"then
+                local valid,color=pcall(Color3.fromHex,value.Color)
+                if valid then config[key]=color end
+            end
+        end
     end
 end
 
@@ -474,6 +550,7 @@ local modules = {
     ChargePreview = module("Client.Gameplay.Actions.ChargePathPreview"),
     ItemUse = module("Client.Gameplay.ItemUseState"),
     Ragdoll = module("Modules.Characters.Ragdoll"),
+    RainbowFlick = module("Modules.Actions.RainbowFlick"),
 }
 
 local function patch(target, key, factory)
@@ -786,6 +863,7 @@ local function begin_shot_feint()
     state.FeintCommitted = false
     state.FeintActive = config.FeintShot and feint_random:NextNumber() < math.clamp(config.FeintChance, 0, 100) / 100
     state.FeintSide = state.FeintActive and (feint_random:NextInteger(0, 1) == 0 and -1 or 1) or nil
+    state.FeintSwitchAt = os.clock() + feint_random:NextNumber(.16,.25)
     state.ShotSolution = nil
 end
 
@@ -796,8 +874,33 @@ local function shot_target()
     if not mouth then return state.ShotTarget end
     local clearance = math.max(modules.Physics.BallRadius + .75, config.ShotMargin)
     local width = math.max(0, mouth.HalfWidth - clearance)
-    local position = mouth.PlanePosition + mouth.Lateral * ((state.FeintSide or 1) * (state.FeintCommitted and -width or width))
+    local blend=math.clamp((os.clock()-(state.FeintSwitchAt or 0))/.15,0,1)
+    blend=blend*blend*(3-2*blend)
+    if state.FeintCommitted then blend=1 end
+    local position = mouth.PlanePosition + mouth.Lateral * ((state.FeintSide or 1) * width * (1-2*blend))
     return safe_shot_target(Vector3.new(position.X, math.max(mouth.BottomY + clearance, mouth.TopY - clearance), position.Z), mouth)
+end
+
+local function begin_shot_flick()
+    state.FlickAttemptAt=os.clock()
+    if not config.FlickShot or not can_act() or not owns_ball()or is_goalkeeper()then return false end
+    if not modules.Controls.IsRainbowFlickUnlocked()or modules.Controls.IsOnCooldown("RainbowFlick")then return false end
+    if not state.NativeFlick then
+        for _,callback in ipairs(getgc(true))do
+            if type(callback)=="function"and debug.info(callback,"n")=="beginRainbowFlick"
+                and debug.info(callback,"s")=="ReplicatedStorage.Client.Gameplay.Gameplay"then
+                state.NativeFlick=callback
+                break
+            end
+        end
+    end
+    if not state.NativeFlick then return false end
+    local ok,result=pcall(state.NativeFlick)
+    if not ok or result~=Enum.ContextActionResult.Sink
+        or not modules.RainbowFlick.GetWindingUpUntil(local_player)then return false end
+    state.FlickPending=os.clock()+1.5
+    state.FlickTriggeredAt=os.clock()
+    return true
 end
 
 local raw_velocity=modules.Shoot.GetVelocity
@@ -969,7 +1072,7 @@ local function aim_payload(original)
         end
         return original
     end
-    if state.PassTarget and state.PassTarget.Root.Parent then
+    if config.AutoPass and state.PassTarget and state.PassTarget.Root.Parent then
         local target = state.PassTarget.Root.Position + state.PassTarget.Root.AssemblyLinearVelocity * 0.15
         local origin = original and original.Origin or workspace.CurrentCamera.CFrame.Position
         local result = table.clone(original or {})
@@ -1059,7 +1162,7 @@ local function install_hooks()
             return function(command, ...)
                 if type(command)=="table" and command.PassType=="Shot" then
                     if name=="Start" then begin_shot_feint() end
-                    if name=="LockAim" or name=="Release" then state.FeintCommitted=true end
+                    if name=="Release" then state.FeintCommitted=true end
                 end
                 guarded("command aim", rewrite_command, command)
                 if name=="Release"and type(command)=="table"and command.PassType=="Shot"then
@@ -1072,10 +1175,15 @@ local function install_hooks()
     patch(modules.ClientShoot, "HandleInputBegan", function(original)
         return function(input, processed, ...)
             if is_goalkeeper()then return original(input,processed,...)end
+            if config.FlickShot and modules.Controls.IsInput("Kick",input)then
+                state.FlickInputAt=os.clock()
+                state.FlickInputProcessed=processed
+            end
             if not processed and modules.Controls.IsInput("Kick", input) then
                 if not modules.ClientShoot.IsCharging() then
                     state.FeintActive, state.FeintSide, state.FeintCommitted = false, nil, false
                 end
+                if begin_shot_flick()then return true end
                 state.ShotInput = input
                 state.FullChargeAt = nil
             end
@@ -1437,6 +1545,18 @@ local function update_prediction()
     end
 end
 
+local function attempt_keeper_dive(direction)
+    if not direction or os.clock()<(state.KeeperNextDiveAt or 0)then return false end
+    state.DiveDirection=direction
+    state.AutomaticDiveThread=coroutine.running()
+    local accepted=guarded("keeper dive",modules.Keeper.Dive)
+    state.DiveDirection=nil
+    state.AutomaticDiveThread=nil
+    state.DiveChoice=nil
+    state.KeeperNextDiveAt=os.clock()+(accepted and modules.Dive.Constants.RepeatDelaySeconds or .25)
+    return accepted==true
+end
+
 local function keeper_step()
     if not config.AutoGoalkeeper or not is_goalkeeper()or owns_ball()then return false end
     if modules.ClientShoot.IsCharging()or modules.Pass.IsCharging()or modules.Keeper.IsForcedClearActive()then return false end
@@ -1446,6 +1566,39 @@ local function keeper_step()
     if not root or not goal then return false end
     local mouth=get_mouth(goal)
     if not mouth then return false end
+    if config.KeeperDiveOnContact and not modules.Dive.IsDiveConstraintActive(root)
+        and not modules.Tackle.IsSlideTackling()then
+        local zone=goal.Parent and goal.Parent:FindFirstChild("Goalkeeper")
+        local nearest,nearestDistance=nil,config.KeeperDiveRange
+        for _,actor in ipairs(state.Actors)do
+            if not actor.Friendly and actor.Root.Parent and actor.Character.Parent
+                and not actor.Character:GetAttribute("Ragdolled")then
+                local inside=false
+                if zone and zone:IsA("BasePart")then
+                    local p=zone.CFrame:PointToObjectSpace(actor.Root.Position)
+                    inside=math.abs(p.X)<=zone.Size.X*.5 and math.abs(p.Z)<=zone.Size.Z*.5
+                        and math.abs(p.Y)<=zone.Size.Y*.5+4
+                else
+                    local relative=actor.Root.Position-mouth.PlanePosition
+                    inside=math.abs(relative:Dot(mouth.Lateral))<=mouth.HalfWidth+30
+                        and math.abs(relative:Dot(mouth.Forward))<=35
+                end
+                if inside then
+                    local delta=actor.Root.Position-root.Position
+                    local distance=Vector3.new(delta.X,0,delta.Z).Magnitude
+                    if distance<nearestDistance then nearest,nearestDistance=actor,distance end
+                end
+            end
+        end
+        if nearest then
+            local predicted=nearest.Root.Position+nearest.Root.AssemblyLinearVelocity*.08
+            local direction=flat(predicted-root.Position)
+            if direction and os.clock()>=(state.KeeperNextDiveAt or 0)then
+                attempt_keeper_dive(direction)
+                return true
+            end
+        end
+    end
     if not crossing then return false end
     local remaining=crossing.Time-modules.Clock.GetSmoothedServerTime()
     if remaining<=0 then return true end
@@ -1464,20 +1617,9 @@ local function keeper_step()
         if distance>2 then state.MoveDirection=flat(delta)end
         return true
     end
-    if os.clock()<(state.KeeperNextDiveAt or 0)then return true end
     local ball=modules.Renderer.GetPosition()
     local direction=flat(delta)or(ball and flat(ball-root.Position))or mouth.Forward
-    state.DiveDirection=direction
-    state.AutomaticDiveThread=coroutine.running()
-    local accepted=guarded("keeper dive",modules.Keeper.Dive)
-    state.DiveDirection=nil
-    state.AutomaticDiveThread=nil
-    state.DiveChoice=nil
-    if accepted then
-        state.KeeperNextDiveAt=os.clock()+modules.Dive.Constants.RepeatDelaySeconds
-    else
-        state.KeeperNextDiveAt=os.clock()+.1
-    end
+    attempt_keeper_dive(direction)
     return true
 end
 
@@ -1530,11 +1672,14 @@ local function automation_step()
     if not can_act() then return end
     local root = local_root()
     local has_ball = owns_ball()
+    if state.HadBall~=has_ball then
+        state.HadBall=has_ball
+        state.PossessionSince=has_ball and os.clock()or nil
+    end
     if config.AutoSprint and not is_goalkeeper() and not modules.Sprint.IsSprintButtonToggled() then
         modules.Sprint.ToggleSprintButton()
         state.OwnedSprintToggle = true
     end
-    if config.InfiniteStamina and ready("stamina", 0.4) then modules.Sprint.RestoreStamina(100) end
     if (config.PerfectCharge or config.UnsavableShot or state.AutoShot) and state.ShotInput and modules.ClientShoot.IsCharging() then
         if (modules.ClientShoot.GetFullChargeProgress() or 0) >= 1 then
             state.FullChargeAt = state.FullChargeAt or os.clock()
@@ -1568,10 +1713,15 @@ local function automation_step()
     end
     if not keeper_step() then magnet_step() end
     if has_ball then
-        if config.AutoDribble and not modules.Dodge.IsDribbling() and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() then
-            if enemy_near(root.Position, config.DribbleRange) and ready("dribble", 0.2) then
-                modules.Dodge.HandleInputBegan(modules.Controls.CreateInput("Dribble"), false)
-                if modules.Dodge.IsDribbling() then  end
+        if config.AutoDribble and not is_goalkeeper()and not modules.Dodge.IsDribbling()
+            and not modules.ClientShoot.IsCharging()and not modules.Pass.IsCharging()
+            and state.PossessionSince and os.clock()-state.PossessionSince>.35 then
+            local enemy=enemy_near(root.Position,math.min(config.DribbleRange,11))
+            if enemy then
+                local toward=flat(enemy.Root.Position-root.Position)
+                if toward and root.CFrame.LookVector:Dot(toward)>.2 and ready("dribble",2.5)then
+                    modules.Dodge.HandleInputBegan(modules.Controls.CreateInput("Dribble"),false)
+                end
             end
         end
         if config.AutoPass and not state.PassInput and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dodge.IsDribbling() and ready("pass", 1.1) then
@@ -1585,6 +1735,14 @@ local function automation_step()
             end
         end
     else
+        if state.FlickPending and os.clock()>state.FlickPending then state.FlickPending=nil end
+        if state.FlickPending and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging()
+            and modules.Volley.IsAvailable(local_player.Character)then
+            state.FlickPending=nil
+            state.ShotInput=modules.Controls.CreateInput("Kick")
+            state.AutoShot=true
+            modules.ClientShoot.HandleInputBegan(state.ShotInput,false)
+        end
         if config.AutoVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.18) then
             if modules.Volley.IsAvailable(local_player.Character) then
                 state.ShotInput = modules.Controls.CreateInput("Kick")
@@ -1615,6 +1773,7 @@ end
 local function unload()
     if not state.Alive then return end
     state.Alive = false
+    if state.MobileGui then state.MobileGui:Destroy()state.MobileGui=nil end
     if library and library.FlushAutosave then pcall(function()library:FlushAutosave()end)end
     pcall(modules.Movement.ClearMultiplier,"AxisSoccerSpeed")
     pcall(modules.Movement.ClearServerRagdollSuppression,"AxisSoccer")
@@ -1642,6 +1801,9 @@ end
 
 local function set_config(key,value)
     config[key]=value
+    if key=="FlickShot"and not value then state.FlickPending=nil end
+    if key=="AutoPass"and not value then state.PassTarget=nil end
+    if key=="AutoGoalkeeper"and not value then state.DiveDirection=nil state.MoveDirection=nil end
     if key=="ShotCurve" or key=="FeintShot" then state.ShotSolution=nil end
     if key=="FeintShot" and not value then state.FeintActive, state.FeintSide = false, nil end
     if key=="InfiniteStamina"then modules.Sprint.SetUnlimitedStamina("AxisSoccer",value)end
@@ -1670,6 +1832,7 @@ env.AxisIllegalSoccer={
 
 local ok, err = xpcall(function()
     build_ui()
+    set_config("InfiniteStamina",config.InfiniteStamina)
     install_hooks()
     refresh_actors()
     refresh_items()
@@ -1703,7 +1866,8 @@ local ok, err = xpcall(function()
         state.BallState, state.Boundary, state.Landing = nil, nil, nil
         state.AutoShot = false
         state.FeintCommitted, state.ShotSolution, state.DiveChoice = nil, nil, nil
-        state.FeintActive, state.FeintSide = false, nil
+        state.FeintActive, state.FeintSide, state.FeintSwitchAt = false, nil, nil
+        state.FlickPending=nil state.PossessionSince=nil
         table.clear(state.Points)
     end)
 end,function(message)return tostring(message)end)
