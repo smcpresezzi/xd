@@ -29,7 +29,6 @@ local KeeperDives = require(Game.KeeperDives)
 local Ball = require(Client.BallView)
 local Mannequin = require(Client.MannequinClient)
 local DribbleClient = require(Client.DribbleClient)
-local SkillPlayback = require(Client.SkillMoves.Playback)
 local Locker = require(Game.Locker)
 local Emotes = require(Game.Emotes)
 local Replay = require(Client.InstantReplay)
@@ -139,8 +138,6 @@ slider(shots,"ShootRange","Shoot range",95,30,220,5)
 toggle(shots,"NoMiss","No miss")
 toggle(shots,"PerfectShot","Perfect shots")
 toggle(shots,"VaryShots","Vary shots",nil,false,true)
-toggle(shots,"FlickShot","Rainbow flick shot")
-slider(shots,"FlickDelay","Flick shot delay",0.55,0.2,1.2,0.05)
 slider(shots,"ShotPower","Shot power",1,0.5,1.4,0.05)
 slider(shots,"ShotGap","Shot interval",1.1,0.5,3,0.1)
 dropdown(shots,"AimSide","Aim",{"Away from keeper","Left","Right","Center"},"Away from keeper")
@@ -494,27 +491,6 @@ local function shootNow()
     end)
     return true
 end
-local function autoShoot(r)
-    if S.FlickPending then return end
-    if C.FlickShot and DribbleClient.kickState() and not SkillPlayback.busy()then
-        local velocity=r.AssemblyLinearVelocity
-        local speed=Vector3.new(velocity.X,0,velocity.Z).Magnitude
-        local label=safe(SkillPlayback.request,{kind="Rainbow"},speed)
-        if label then
-            S.FlickPending=true
-            lastShot=os.clock()
-            task.delay(C.FlickDelay,function()
-                S.FlickPending=false
-                if not S.Loaded or not C.AutoScore or Window.IsOpen then return end
-                local current=root()
-                local ball=Ball.getPosition()
-                if current and ball and (ball-current.Position).Magnitude<10 and shotInRange(current.Position)then shootNow()end
-            end)
-            return
-        end
-    end
-    shootNow()
-end
 local function keeperStep(position,velocity,r,model,now)
     if not C.AutoSave or model:GetAttribute("Role")~="Goalkeeper"or not Mannequin.keeperDiveTo then return end
     local gap=(position-r.Position).Magnitude
@@ -739,9 +715,9 @@ connect(RS.Heartbeat,function(dt)
                 end
             end
             if C.AutoScore and not Window.IsOpen and now-lastShot>C.ShotGap
-                and not S.FlickPending and shotInRange(r.Position)
+                and shotInRange(r.Position)
                 and (DribbleClient.kickState()or gap<7)then
-                autoShoot(r)
+                shootNow()
             end
             lastPosition,lastAt=position,now
         end
@@ -843,6 +819,7 @@ end
 function Library:Unload()S.Unload()end
 Library:CreateSettingsPage(Window)
 Window:Init()
+if Library.StartAutosave then safe(function()Library:StartAutosave()end)end
 safe(updatePreview)
 end)
 if not ok then local s=getgenv().AxisSoccer if s and s.Unload then pcall(s.Unload)end end
