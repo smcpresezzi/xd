@@ -29,21 +29,22 @@ local KeeperDives = require(Game.KeeperDives)
 local Ball = require(Client.BallView)
 local Mannequin = require(Client.MannequinClient)
 local DribbleClient = require(Client.DribbleClient)
+local SkillPlayback = require(Client.SkillMoves.Playback)
 local Locker = require(Game.Locker)
 local Emotes = require(Game.Emotes)
 local Replay = require(Client.InstantReplay)
 local Net = require(Shared.Net)
 local C = {}
-local S = {Loaded=true, Config=C, Connections={}, Hooks={}}
+local S = {Loaded=true, Config=C, Connections={}, Hooks={}, Errors={}}
 env.AxisSoccer = S
 local patches, instances, originals, attributes = {}, {}, {}, {}
-local movementWish, movementWishAt=nil,0
+local movementWish, movementWishAt,movementSource=nil,0,nil
 local function safe(fn, ...)
     local args=table.pack(...)
     if setthreadidentity then setthreadidentity(8)end
     local result = table.pack(pcall(function()return fn(table.unpack(args,1,args.n))end))
     if setthreadidentity then setthreadidentity(8)end
-    if not result[1] then return end
+    if not result[1] then S.Errors.Last=tostring(result[2]) return end
     return table.unpack(result,2,result.n)
 end
 local function connect(signal, fn)
@@ -105,11 +106,11 @@ S.Window=Window
 local function section(page,title,side)
     if setthreadidentity then setthreadidentity(8)end
 return page:Section({Name=title,Side=side or 1})end
-local function toggle(group,id,text,callback,bound)
+local function toggle(group,id,text,callback,bound,default)
     if setthreadidentity then setthreadidentity(8)end
 
-    C[id]=false
-    local t=group:Toggle({Name=text,Flag="Soccer_"..id,Default=false,Callback=function(v) C[id]=v if callback then safe(callback,v)end end})
+    C[id]=default==true
+    local t=group:Toggle({Name=text,Flag="Soccer_"..id,Default=C[id],Callback=function(v) C[id]=v if callback then safe(callback,v)end end})
     if bound then t:GetBind({Flag="Soccer_"..id.."Key",Default=Enum.KeyCode.Backspace,Mode="Toggle",Callback=function(v)t:Set(v)end})end
     return t
 end
@@ -134,8 +135,12 @@ end
 local ballPage=Window:Page({Name="Ball",Icon="100050851789190"})
 local shots=section(ballPage,"Shooting")
 toggle(shots,"AutoScore","Auto score",nil,true)
+slider(shots,"ShootRange","Shoot range",95,30,220,5)
 toggle(shots,"NoMiss","No miss")
 toggle(shots,"PerfectShot","Perfect shots")
+toggle(shots,"VaryShots","Vary shots",nil,false,true)
+toggle(shots,"FlickShot","Rainbow flick shot")
+slider(shots,"FlickDelay","Flick shot delay",0.55,0.2,1.2,0.05)
 slider(shots,"ShotPower","Shot power",1,0.5,1.4,0.05)
 slider(shots,"ShotGap","Shot interval",1.1,0.5,3,0.1)
 dropdown(shots,"AimSide","Aim",{"Away from keeper","Left","Right","Center"},"Away from keeper")
@@ -143,6 +148,7 @@ slider(shots,"AimHeight","Height",0.55,0.1,0.9,0.05)
 slider(shots,"AimWidth","Width",0.8,0.1,0.95,0.05)
 slider(shots,"AimAngle","Aim angle",0,-20,20,1)
 toggle(shots,"CustomCurve","Custom curve")
+toggle(shots,"AutoCurve","Curve auto shots",nil,false,true)
 dropdown(shots,"CurveSide","Curve",{"Toward corner","Left","Right"},"Toward corner")
 slider(shots,"CurveAmount","Curve strength",20,0,60,1)
 local control=section(ballPage,"Possession",2)
@@ -162,6 +168,8 @@ end})
 local keepPage=Window:Page({Name="Keeper",Icon="100050851789190"})
 local saves=section(keepPage,"Saves")
 toggle(saves,"AutoSave","Auto save",nil,true)
+toggle(saves,"KeeperPosition","Auto position",nil,false,true)
+slider(saves,"PositionRange","Position range",105,40,160,5)
 slider(saves,"Reaction","Reaction",0.12,0.05,0.5,0.01)
 slider(saves,"MinBallSpeed","Min ball speed",12,1,100,1)
 slider(saves,"SaveRange","Save range",25,5,50,1)
@@ -185,31 +193,60 @@ toggle(recovery,"AntiRagdoll","Anti ragdoll")
 toggle(recovery,"InstantGetUp","Instant get up")
 toggle(recovery,"FastGetUp","Fast get up")
 toggle(recovery,"WalkThroughNets","Walk through nets")
-local function goalTarget(from)
-    local _,model=root()
+local shotRandom=Random.new()
+local function attackGoal(model)
     if not model then return end
     local side=workspace:GetAttribute("BlueSide")==1 and 1 or -1
     if model:GetAttribute("Team")=="Blue"then side=-side end
-    local chosen
     for _,frame in ipairs(CS:GetTagged("SoccerGoalFrame"))do
-        if frame:IsA("BasePart")and frame:IsDescendantOf(workspace)and frame.Position.X*side>0 then chosen=frame break end
+        if frame:IsA("BasePart")and frame:IsDescendantOf(workspace)and frame.Position.X*side>0 then return frame end
     end
-    if not chosen then return end
-    local scale=chosen.Size.Y/9.142857142857
-    local bottom=chosen.Position.Y-chosen.Size.Y/2
+end
+local function shotInRange(from)
+    local _,model=root()
+    local goal=attackGoal(model)
+    if typeof(from)~="Vector3"or not goal then return false end
+    local delta=goal.Position-from
+    return Vector3.new(delta.X,0,delta.Z).Magnitude<=C.ShootRange,goal
+end
+local function goalTarget(from)
+    local inRange,goal=shotInRange(from)
+    if not inRange then return end
+    local cached=S.ShotPlan
+    if cached and cached.Goal==goal and os.clock()-cached.At<0.8 and (cached.From-from).Magnitude<5 then
+        return cached.Point,cached.Side
+    end
+    local _,model=root()
+    local keeper
+    for _,player in ipairs(Players:GetPlayers())do
+        local char=player.Character
+        local r=char and char:FindFirstChild("Root")
+        if r and char:GetAttribute("Role")=="Goalkeeper"and char:GetAttribute("Team")~=model:GetAttribute("Team")then keeper=r break end
+    end
+    local keeperZ=keeper and keeper.Position.Z+keeper.AssemblyLinearVelocity.Z*.18 or goal.Position.Z
+    local bottom=goal.Position.Y-goal.Size.Y*.5
+    local width=math.max(0,goal.Size.Z*.5-2)
+    local low=bottom+1.5
+    local high=bottom+goal.Size.Y-1.5
     local sign=C.AimSide=="Left"and -1 or C.AimSide=="Right"and 1 or 0
-    if C.AimSide=="Away from keeper"then
-        local keeper
-        for _,player in ipairs(Players:GetPlayers())do
-            local char=player.Character
-            local r=char and char:FindFirstChild("Root")
-            if r and char:GetAttribute("Role")=="Goalkeeper"and char:GetAttribute("Team")~=model:GetAttribute("Team")then keeper=r break end
-        end
-        sign=keeper and (keeper.Position.Z>=chosen.Position.Z and -1 or 1)or 1
+    if C.AimSide=="Away from keeper"then sign=keeperZ>=goal.Position.Z and -1 or 1 end
+    local best,bestScore,bestSide
+    local tries=C.VaryShots and 10 or 1
+    for _=1,tries do
+        local side=sign
+        if C.AimSide=="Center"then side=0 end
+        if C.VaryShots and C.AimSide=="Away from keeper"and shotRandom:NextNumber()<.24 then side=-side end
+        if C.VaryShots and not keeper and C.AimSide=="Away from keeper"then side=shotRandom:NextInteger(0,1)==0 and -1 or 1 end
+        local widthScale=C.VaryShots and math.clamp(C.AimWidth+shotRandom:NextNumber(-.14,.13),.55,.97)or C.AimWidth
+        local heightScale=C.VaryShots and math.clamp(C.AimHeight+shotRandom:NextNumber(-.38,.32),.12,.88)or C.AimHeight
+        local point=Vector3.new(goal.Position.X,low+(high-low)*heightScale,goal.Position.Z+side*width*widthScale)
+        local score=(keeper and math.abs(point.Z-keeperZ)*.65 or 0)+shotRandom:NextNumber(0,4)
+        if S.LastShotPoint then score-=math.max(0,7-(point-S.LastShotPoint).Magnitude)*1.5 end
+        if not bestScore or score>bestScore then best,bestScore,bestSide=point,score,side end
     end
-    local point=Vector3.new(chosen.Position.X,bottom+8.714285714*scale*C.AimHeight,chosen.Position.Z+sign*13.07142857*scale*C.AimWidth)
-    if C.AimAngle~=0 then point=from+CFrame.Angles(0,math.rad(C.AimAngle),0):VectorToWorldSpace(point-from)end
-    return point,sign
+    if C.AimAngle~=0 then best=from+CFrame.Angles(0,math.rad(C.AimAngle),0):VectorToWorldSpace(best-from)end
+    S.ShotPlan={Point=best,Side=bestSide,Goal=goal,From=from,At=os.clock()}
+    return best,bestSide
 end
 local function hook(fn,wrapper)
     if not hookfunction then return end
@@ -219,19 +256,25 @@ local function hook(fn,wrapper)
 end
 hook(Kick.Strike.solve,function(old,args)
     if not S.Loaded then return old(args)end
-    if C.PerfectShot and typeof(args.from)=="Vector3"then
+    local family=args.family
+    local pass=family==Kick.Families.PushPass or family==Kick.Families.VolleyPass or family==Kick.Families.VolleyPush
+    local aimed=not pass and C.PerfectShot and typeof(args.from)=="Vector3"and shotInRange(args.from)
+    if aimed then
         local point=goalTarget(args.from)
         if point then
             local aim=table.clone(args.aim or {})
             aim.kind="Point" aim.point=point aim.dir=(point-args.from).Unit
             args.aim=aim
+            S.LastShotPoint=point
         end
     end
     if C.NoMiss then args.errorScale=0 args.exact=true end
-    if C.CustomCurve then
+    if not pass and typeof(args.from)=="Vector3"and shotInRange(args.from)
+        and (C.CustomCurve or (C.AutoCurve and S.AutoShotAt and os.clock()-S.AutoShotAt<1))then
         local sign=C.CurveSide=="Left"and -1 or 1
         if C.CurveSide=="Toward corner"then local _,side=goalTarget(args.from)sign=side or 1 end
-        args.curve=sign*C.CurveAmount
+        local strength=C.VaryShots and shotRandom:NextNumber(.72,1)or 1
+        args.curve=sign*C.CurveAmount*strength
     end
     return old(args)
 end)
@@ -245,7 +288,8 @@ hook(Mannequin.kickFall,function(old,model,...)
 end)
 if type(Mannequin.shapeMove)=="function"then
     hook(Mannequin.shapeMove,function(old,input,...)
-        if S.Loaded and movementWish and os.clock()-movementWishAt<0.15 and not Window.IsOpen and not UIS:GetFocusedTextBox()then
+        if S.Loaded and movementWish and os.clock()-movementWishAt<0.15 and (movementSource=="Keeper"or not Window.IsOpen)and not UIS:GetFocusedTextBox()then
+            if movementSource=="Keeper"and typeof(input)=="Vector2"and input.Magnitude>.18 then return old(input,...)end
             local cf=workspace.CurrentCamera.CFrame
             local forward=Vector3.new(cf.LookVector.X,0,cf.LookVector.Z)
             local right=Vector3.new(cf.RightVector.X,0,cf.RightVector.Z)
@@ -440,17 +484,169 @@ local function click(button)
     if button and button:IsA("GuiButton")and visible(button)then emit(button.Activated) return true end
 end
 local lastPosition,lastAt,lastSave,lastShot,lastMagnet= nil,0,0,0,0
+local function shootNow()
+    S.ShotPlan=nil
+    S.AutoShotAt=os.clock()
+    lastShot=S.AutoShotAt
+    if not action("Kick","KickShoot")then S.AutoShotAt=nil return false end
+    task.delay(Kick.Rules.Charge.FullTime,function()
+        if S.Loaded then action("Kick","KickShoot",true)end
+    end)
+    return true
+end
+local function autoShoot(r)
+    if S.FlickPending then return end
+    if C.FlickShot and DribbleClient.kickState() and not SkillPlayback.busy()then
+        local velocity=r.AssemblyLinearVelocity
+        local speed=Vector3.new(velocity.X,0,velocity.Z).Magnitude
+        local label=safe(SkillPlayback.request,{kind="Rainbow"},speed)
+        if label then
+            S.FlickPending=true
+            lastShot=os.clock()
+            task.delay(C.FlickDelay,function()
+                S.FlickPending=false
+                if not S.Loaded or not C.AutoScore or Window.IsOpen then return end
+                local current=root()
+                local ball=Ball.getPosition()
+                if current and ball and (ball-current.Position).Magnitude<10 and shotInRange(current.Position)then shootNow()end
+            end)
+            return
+        end
+    end
+    shootNow()
+end
 local function keeperStep(position,velocity,r,model,now)
-    if not C.AutoSave or model:GetAttribute("Role")~="Goalkeeper"or Window.IsOpen or now-lastSave<C.Reaction then return end
-    if velocity.Magnitude<C.MinBallSpeed or (position-r.Position).Magnitude>C.SaveRange then return end
-    if (r.Position-position):Dot(velocity)<=0 then return end
-    local point=position+velocity*C.SaveLead
-    local delta=point-r.Position
-    local side=r.CFrame:VectorToObjectSpace(delta).X
+    if not C.AutoSave or model:GetAttribute("Role")~="Goalkeeper"or not Mannequin.keeperDiveTo then return end
+    local gap=(position-r.Position).Magnitude
+    if now-lastSave<.65 then return end
+    if velocity.Magnitude<math.max(4,C.MinBallSpeed)or gap>C.SaveRange then return end
+    local goal,nearest
+    for _,frame in ipairs(CS:GetTagged("SoccerGoalFrame"))do
+        if frame:IsA("BasePart")and frame:IsDescendantOf(workspace)then
+            local distance=(frame.Position-r.Position).Magnitude
+            if not nearest or distance<nearest then goal,nearest=frame,distance end
+        end
+    end
+    if not goal or math.abs(velocity.X)<3 then return end
+    local goalTime=(goal.Position.X-position.X)/velocity.X
+    if goalTime<=0 or goalTime>1.4 then return end
+    local serverNow=workspace:GetServerTimeNow()
+    local function predict(time)
+        local point=Ball.freeSample(serverNow+time)
+        if typeof(point)=="Vector3"and point.Magnitude>.01 then return point end
+        return position+velocity*time+Vector3.new(0,-23*time*time,0)
+    end
+    for _=1,2 do
+        local point=predict(goalTime)
+        goalTime=math.clamp(goalTime+(goal.Position.X-point.X)/velocity.X,.02,1.4)
+    end
+    local crossing=predict(goalTime)
+    if math.abs(crossing.Z-goal.Position.Z)>goal.Size.Z*.5+1.5
+        or crossing.Y>goal.Position.Y+goal.Size.Y*.5+2 then return end
+    local keeperTime=(r.Position.X-position.X)/velocity.X
+    if keeperTime<0 or keeperTime>goalTime+.08 then return end
+    local point=predict(math.max(.02,keeperTime))
+    local camera=workspace.CurrentCamera
+    if not camera then return end
+    local right=camera.CFrame.RightVector
+    right=Vector3.new(right.X,0,right.Z)
+    if right.Magnitude<.1 then return end
+    local side=(point-r.Position):Dot(right.Unit)
+    local timeToBall=math.min(keeperTime,goalTime)
+    local travel=.25+math.abs(side)/math.max(10,Tuning.Dive.SpeedPower*(C.DiveBoost or 1))
+    local lead=math.clamp(C.SaveLead*.2+.12-C.Reaction,.04,.22)
+    if timeToBall>travel+lead then return end
     if C.DiveZone=="Left"and side>0 or C.DiveZone=="Right"and side<0 or C.DiveZone=="Center"and math.abs(side)>4 then return end
-    lastSave=now
-    if C.LowSmother and point.Y<r.Position.Y-1 then action("KeeperSmother","Smother")
-    elseif Mannequin.keeperDiveTo and delta.Magnitude>0.1 then Mannequin.keeperDiveTo(delta.Unit,point.Y>r.Position.Y+4)end
+    local sign=side>=0 and 1 or -1
+    local height=point.Y-r.Position.Y
+    local direction
+    if math.abs(side)<2.2 and height>2.8 then
+        direction=Vector2.new(0,1)
+    elseif C.LowSmother and math.abs(side)<2.2 and height<1.5 then
+        direction=Vector2.new(0,-1)
+    elseif height<-.8 then
+        direction=Vector2.new(sign,-.65)
+    elseif height>2.5 then
+        direction=Vector2.new(sign,.7)
+    else
+        direction=Vector2.new(sign,0)
+    end
+    local result=Mannequin.keeperDiveTo(direction.Unit,false)
+    if result then lastSave=now end
+end
+local positionTarget,positionAt,positionMoving=nil,0,false
+local function keeperPositionStep(r,model)
+    if not C.KeeperPosition or model:GetAttribute("Role")~="Goalkeeper"or Mannequin.keeperBusy and Mannequin.keeperBusy()then
+        positionTarget=nil positionMoving=false return
+    end
+    local state=model:GetAttribute("BodyState")
+    if state and state~="Animated"or not model:FindFirstChildOfClass("ControllerManager")then return end
+    local goal,nearest
+    for _,frame in ipairs(CS:GetTagged("SoccerGoalFrame"))do
+        if frame:IsA("BasePart")and frame:IsDescendantOf(workspace)then
+            local distance=(frame.Position-r.Position).Magnitude
+            if not nearest or distance<nearest then goal,nearest=frame,distance end
+        end
+    end
+    if not goal or nearest>45 then positionTarget=nil positionMoving=false return end
+    local now=os.clock()
+    if now-positionAt>.12 then
+        positionAt=now
+        local ball=Ball.getBall()
+        local possessor=ball and ball:GetAttribute("Possessor")
+        local origin,facing
+        if type(possessor)=="number"and possessor~=0 then
+            for _,player in ipairs(Players:GetPlayers())do
+                local character=player.Character
+                local carrier=character and character:FindFirstChild("Root")
+                if carrier and character:GetAttribute("DribbleId")==possessor then
+                    if character:GetAttribute("Team")~=model:GetAttribute("Team")then
+                        origin=Ball.getPosition()or carrier.Position
+                        facing=carrier.CFrame.LookVector
+                    end
+                    break
+                end
+            end
+        else
+            local source=Ball.getSource()
+            if source=="free"or source=="released"then
+                local point,velocity=Ball.freeState()
+                if typeof(point)=="Vector3"and typeof(velocity)=="Vector3"
+                    and velocity.Magnitude<18 and (point-goal.Position).Magnitude<C.PositionRange then origin=point end
+            end
+        end
+        local wanted=goal.Position.Z
+        if origin and (origin-goal.Position).Magnitude<C.PositionRange then
+            local span=goal.Position.X-origin.X
+            if math.abs(span)>4 then
+                local fraction=math.clamp((r.Position.X-origin.X)/span,0,1)
+                wanted=origin.Z+(goal.Position.Z-origin.Z)*fraction
+                if facing and facing.X*span>0 and math.abs(facing.X)>.25 then
+                    local aimed=origin.Z+facing.Z/facing.X*(r.Position.X-origin.X)
+                    wanted+=math.clamp(aimed-wanted,-8,8)*.35
+                end
+            else
+                wanted=origin.Z
+            end
+        end
+        wanted=math.clamp(wanted,goal.Position.Z-goal.Size.Z*.5+2,goal.Position.Z+goal.Size.Z*.5-2)
+        positionTarget=positionTarget and positionTarget+(wanted-positionTarget)*.28 or wanted
+    end
+    if not positionTarget then return end
+    local delta=positionTarget-r.Position.Z
+    if positionMoving then
+        if math.abs(delta)<1.5 then positionMoving=false end
+    elseif math.abs(delta)>3 then
+        positionMoving=true
+    end
+    if positionMoving then
+        local strength=math.clamp(math.abs(delta)/8,.25,.8)
+        movementWish=Vector3.new(0,0,delta>0 and strength or -strength)
+        movementWishAt=now
+        movementSource="Keeper"
+    end
+    S.PositionTarget=positionTarget
+    S.PositionMoving=positionMoving
 end
 local function tuningStep()
     for key,value in pairs(Tuning.Speed)do
@@ -479,12 +675,17 @@ end
 local followBinding="AxisSoccerPossession"
 RS:BindToRenderStep(followBinding,Enum.RenderPriority.Input.Value,function()
     movementWish=nil
+    movementSource=nil
     if not S.Loaded then return end
-    if not C.StickToBall or Window.IsOpen or UIS:GetFocusedTextBox()then return end
+    if UIS:GetFocusedTextBox()then return end
     safe(function()
         local r,model=root()
+        if not r then return end
+        if C.KeeperPosition and model:GetAttribute("Role")=="Goalkeeper"then keeperPositionStep(r,model) return end
+        if Window.IsOpen then return end
+        if not C.StickToBall then return end
         local position=Ball.getPosition()
-        if not r or not position then return end
+        if not position then return end
         local state=model:GetAttribute("BodyState")
         if state and state~="Animated"then return end
         local manager=model:FindFirstChildOfClass("ControllerManager")
@@ -507,7 +708,15 @@ connect(RS.Heartbeat,function(dt)
         local r,model=root()
         if position and r then
             local velocity=lastPosition and now>lastAt and (position-lastPosition)/(now-lastAt)or Vector3.zero
-            keeperStep(position,velocity,r,model,now)
+            local source=Ball.getSource()
+            if source=="free"or source=="released"then
+                local freePosition,freeVelocity=Ball.freeState()
+                if typeof(freePosition)=="Vector3"and typeof(freeVelocity)=="Vector3"then
+                    keeperStep(freePosition,freeVelocity,r,model,now)
+                else
+                    keeperStep(position,velocity,r,model,now)
+                end
+            end
             local gap=(position-r.Position).Magnitude
             if C.BallMagnet and not Window.IsOpen and not UIS:GetFocusedTextBox()and not DribbleClient.kickState()
                 and gap<=C.MagnetRange and gap>2 and now-lastMagnet>=C.MagnetCooldown then
@@ -529,11 +738,10 @@ connect(RS.Heartbeat,function(dt)
                     lastMagnet=now
                 end
             end
-            if C.AutoScore and not Window.IsOpen and now-lastShot>C.ShotGap and (DribbleClient.kickState()or gap<7)then
-                lastShot=now
-                if action("Kick","KickShoot")then
-                    task.delay(Kick.Rules.Charge.FullTime,function()if S.Loaded then action("Kick","KickShoot",true)end end)
-                end
+            if C.AutoScore and not Window.IsOpen and now-lastShot>C.ShotGap
+                and not S.FlickPending and shotInRange(r.Position)
+                and (DribbleClient.kickState()or gap<7)then
+                autoShoot(r)
             end
             lastPosition,lastAt=position,now
         end
