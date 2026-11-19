@@ -2105,7 +2105,12 @@ local function keeper_step()
     local mouth=get_mouth(goal)
     if not mouth then return false end
     local carrier=modules.Renderer.GetOwnedUserId()
-    if config.KeeperDiveOnContact and carrier and not modules.Dive.IsDiveConstraintActive(root)
+    if carrier~=state.KeeperCarrier then
+        state.KeeperCarrier=carrier
+        state.KeeperCarrierSince=os.clock()
+    end
+    if config.KeeperDiveOnContact and carrier and os.clock()-(state.KeeperCarrierSince or 0)>=.35
+        and not modules.Dive.IsDiveConstraintActive(root)
         and not modules.Tackle.IsSlideTackling()then
         local zone=goal.Parent and goal.Parent:FindFirstChild("Goalkeeper")
         local nearest,nearestDistance=nil,config.KeeperDiveRange
@@ -2571,6 +2576,7 @@ local ok, err = xpcall(function()
     connect(local_player.CharacterRemoving, function()
         state.ShotInput, state.PassInput, state.PassTarget = nil, nil, nil
         state.MoveDirection, state.DiveDirection, state.Crossing = nil, nil, nil
+        state.KeeperCarrier, state.KeeperCarrierSince = nil, nil
         state.BallState, state.Boundary, state.Landing = nil, nil, nil
         state.AutoShot = false
         state.FeintCommitted, state.ShotSolution, state.DiveChoice = nil, nil, nil
