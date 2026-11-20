@@ -5,12 +5,45 @@ return function(context)
     local state=context.State
     local library=assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/lofaif1234/axisui/main/source/library.lua")))()
     local playerGui=game:GetService("Players").LocalPlayer.PlayerGui
+    local input=game:GetService("UserInputService")
+    local runService=game:GetService("RunService")
+    local mouseBehavior=input.MouseBehavior
+    local mouseIcon=input.MouseIconEnabled
     library.Holder.Instance.Parent=playerGui
     library.UnusedHolder.Instance.Parent=playerGui
     local logo=library.Folders.Assets.."/axis-logo.png"
     if not isfile(logo)then writefile(logo,game:HttpGet("https://raw.githubusercontent.com/lofaif1234/axisui/main/assets/axis-logo.png"))end
     library.MenuKeybind=tostring(Enum.KeyCode.RightShift)
     local window=library:Window({Name="",SubName="",Logo=getcustomasset(logo),Wordmark=true})
+    local previousBehavior=mouseBehavior
+    local previousIcon=mouseIcon
+    local function syncMouse()
+        if window.IsOpen then
+            if previousBehavior==nil then
+                previousBehavior=input.MouseBehavior
+                previousIcon=input.MouseIconEnabled
+            end
+            input.MouseBehavior=Enum.MouseBehavior.Default
+            input.MouseIconEnabled=true
+        elseif previousBehavior~=nil then
+            if input.MouseBehavior==Enum.MouseBehavior.Default then input.MouseBehavior=previousBehavior end
+            if input.MouseIconEnabled then input.MouseIconEnabled=previousIcon end
+            previousBehavior=nil
+            previousIcon=nil
+        end
+    end
+    local nativeSetOpen=window.SetOpen
+    function window:SetOpen(value)
+        nativeSetOpen(self,value)
+        syncMouse()
+    end
+    syncMouse()
+    runService:BindToRenderStep("AxisSoccerMouseUnlock",Enum.RenderPriority.Camera.Value+1,syncMouse)
+    state.MouseUnlockCleanup=function()
+        runService:UnbindFromRenderStep("AxisSoccerMouseUnlock")
+        window.IsOpen=false
+        syncMouse()
+    end
     local controls={}
     local bindsReady=false
     local bound={ShotAimbot=true,AutoGoalkeeper=true,BallMagnet=true,SpeedBoost=true,ItemAimbot=true}
@@ -32,6 +65,7 @@ return function(context)
     local combat=window:Page({Name="Combat",Icon="134242818164054"})
     local shots=combat:Section({Name="Shooting",Side=1})
     toggle(shots,"ShotAimbot","Enabled")
+    toggle(shots,"ShotRandomizer","Placement variety")
     dropdown(shots,"ShotPlacement","Placement",{"Auto","Upper Left","Upper Right","Lower Left","Lower Right","Center"})
     dropdown(shots,"TargetPost","Target goal",{"Automatic","Team1","Team2"})
     slider(shots,"ShootRange","Shoot range",25,250,5)
@@ -48,7 +82,10 @@ return function(context)
     local passing=combat:Section({Name="Passing",Side=2})
     toggle(passing,"AutoPass","Auto pass")
     slider(passing,"PassRange","Range",15,160)
+    toggle(passing,"SafePass","Safe lanes")
+    slider(passing,"PassClearance","Clearance",3,18)
     toggle(passing,"AutoVolley","Auto volley")
+    slider(passing,"AutoVolleyRange","Volley range",20,110)
     toggle(passing,"KeeperClearAimbot","Keeper clear aim")
     toggle(passing,"AutoCallForPass","Call for pass")
     slider(passing,"CallInterval","Call interval",1,8,.1)
@@ -60,6 +97,8 @@ return function(context)
     slider(defense,"DribbleRange","Dribble range",5,25)
     local keeper=combat:Section({Name="Goalkeeper",Side=2})
     toggle(keeper,"AutoGoalkeeper","Enabled")
+    toggle(keeper,"KeeperAutoPosition","Auto position")
+    slider(keeper,"KeeperArcDepth","Position depth",2,10,.5)
     toggle(keeper,"KeeperAutoTackle","Auto tackle")
     slider(keeper,"KeeperTackleRange","Tackle range",4,24)
     slider(keeper,"KeeperReaction","Reaction lead",.05,.45,.01)
@@ -459,11 +498,11 @@ local config = {
     SkeletonColor=Color3.fromRGB(65,155,255),TracerColor=Color3.fromRGB(65,155,255),ChamsColor=Color3.fromRGB(65,155,255),
     GlowColor=Color3.fromRGB(65,155,255),ShaderColor=Color3.fromRGB(65,155,255),ShotColor=Color3.fromRGB(65,155,255),
     LandingColor=Color3.fromRGB(103,227,198),ProjectileColor=Color3.fromRGB(255,130,90),ItemBoxColor=Color3.fromRGB(190,156,255),ItemFOVColor=Color3.new(1,1,1),
-    ShotAimbot = false, ShotPlacement = "Auto", TargetPost = "Automatic", ShootRange = 110,
-    UnsavableShot = false, PerfectCharge = false, AutoPass = false,
+    ShotAimbot = false, ShotPlacement = "Auto", ShotRandomizer = false, TargetPost = "Automatic", ShootRange = 110,
+    UnsavableShot = false, PerfectCharge = false, AutoPass = false, SafePass = false, PassClearance = 7,
     CurveShot = false, CurveSide = "Auto", ShotCurve = 70, FeintShot = false, FeintChance = 50, FlickShot = false, KeeperAutoTackle = false, KeeperTackleRange = 12,
-    KeeperDiveOnContact = true, KeeperDiveRange = 10,
-    AutoVolley = false, TackleAimbot = false, AutoTackle = false,
+    KeeperDiveOnContact = true, KeeperDiveRange = 10, KeeperAutoPosition = false, KeeperArcDepth = 6,
+    AutoVolley = false, AutoVolleyRange = 80, TackleAimbot = false, AutoTackle = false,
     AutoDribble = false, AutoGoalkeeper = false, KeeperClearAimbot = false,
     AutoCallForPass = false, AutoSprint = false, InfiniteStamina = false,
     NoBallSlowdown = false, FullSpeedCharge = false, BallMagnet = false,
@@ -545,6 +584,7 @@ local modules = {
     ClientShoot = module("Client.Gameplay.Actions.Shoot"),
     Pass = module("Client.Gameplay.Actions.Pass"),
     Volley = module("Client.Gameplay.Actions.VolleyOpportunity"),
+    AssistedPass = module("Modules.Actions.AssistedPass"),
     Dodge = module("Client.Gameplay.Actions.Dodge"),
     DodgeAction = module("Modules.Actions.Dodge"),
     SlideTackle = module("Modules.Actions.SlideTackle"),
@@ -557,6 +597,7 @@ local modules = {
     Keeper = module("Client.Gameplay.Player.GoalkeeperRole"),
     Dive = module("Modules.Actions.GoalkeeperDive"),
     ActionCharge = module("Modules.Actions.ActionChargeState"),
+    TackleEffects = module("Client.Gameplay.Actions.TackleEffects"),
     Hitboxes = module("Modules.Gameplay.HitboxSettings"),
     Mobile = module("Client.Interface.Mobile"),
     DiveAssist = module("Modules.Actions.GoalkeeperDiveAssist"),
@@ -793,15 +834,18 @@ local function select_shot()
     end
     local best,bestScore
     local ranked={}
+    local randomizer=config.ShotRandomizer and Random.new(state.ShotRandomSeed or 1)
     for _,fraction in ipairs({-.95,.95,-.72,.72,-.45,.45,0})do
         for _,height in ipairs({low,middle,high})do
-            local candidate=point(width*fraction,height)
+            local offset=randomizer and randomizer:NextNumber(-1.5,1.5)or 0
+            local candidate=point(math.clamp(width*fraction+offset,-width,width),height)
             local score=difficulty(candidate)
             score-=math.abs(fraction)^4*.35
             score-=math.abs(height-middle)*.04
             if state.LastShotTarget and os.clock()-(state.LastShotAt or 0)<12 then
-                score-=math.max(0,1-(candidate-state.LastShotTarget).Magnitude/8)*.5
+                score-=math.max(0,1-(candidate-state.LastShotTarget).Magnitude/8)*(randomizer and 8 or .5)
             end
+            if randomizer then score+=randomizer:NextNumber(-1,1)end
             local segment=candidate-origin
             local length=math.max(segment:Dot(segment),1)
             for _,actor in ipairs(state.Actors)do
@@ -854,16 +898,25 @@ local function best_teammate()
     local best, best_score = nil, -math.huge
     for _, actor in state.Actors do
         if actor.Friendly and actor.Root.Parent and not actor.Character:GetAttribute("Ragdolled") then
-            local distance = (actor.Root.Position - root.Position).Magnitude
+            local ok_target,assisted=pcall(modules.AssistedPass.GetTargetPosition,actor.Character)
+            local destination=ok_target and typeof(assisted)=="Vector3"and assisted or actor.Root.Position
+            local distance = (destination - root.Position).Magnitude
             if distance >= 8 and distance <= config.PassRange then
-                local clearance = 40
+                local clearance = math.huge
+                local segment=Vector3.new(destination.X-root.Position.X,0,destination.Z-root.Position.Z)
+                local flight=segment.Magnitude/math.max(35,modules.Shoot.Constants.Shot.MinimumSpeed)
                 for _, enemy in state.Actors do
-                    if not enemy.Friendly and enemy.Team then
-                        clearance = math.min(clearance, (enemy.Root.Position - actor.Root.Position).Magnitude)
+                    if not enemy.Friendly and enemy.Root.Parent and enemy.Character~=actor.Character then
+                        local relative=Vector3.new(enemy.Root.Position.X-root.Position.X,0,enemy.Root.Position.Z-root.Position.Z)
+                        local velocity=Vector3.new(enemy.Root.AssemblyLinearVelocity.X,0,enemy.Root.AssemblyLinearVelocity.Z)-segment/flight
+                        local divisor=velocity:Dot(velocity)
+                        local time=divisor>1e-6 and math.clamp(-relative:Dot(velocity)/divisor,0,flight)or 0
+                        clearance=math.min(clearance,(relative+velocity*time).Magnitude)
                     end
                 end
+                if config.SafePass and clearance<config.PassClearance then continue end
                 local progress = goal and ((root.Position - goal.Position).Magnitude - (actor.Root.Position - goal.Position).Magnitude) or 0
-                local score = clearance * 1.4 + progress * 0.4 - distance * 0.12
+                local score = math.min(clearance,40)*1.4 + progress * 0.4 - distance * 0.12
                 if score > best_score then best, best_score = actor, score end
             end
         end
@@ -1059,6 +1112,7 @@ local function begin_shot_feint()
 end
 
 local function shot_target()
+    if state.VolleyTarget then return state.VolleyTarget end
     if not within_shoot_range() then return nil end
     if state.FlickVolley and state.FlickShotTarget then return state.FlickShotTarget end
     if not config.FeintShot or not state.FeintActive then return state.ShotTarget end
@@ -1301,7 +1355,7 @@ end
 local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
     local character=local_player.Character
     if not character or not target then return nil end
-    local goal = not is_throw and (state.FlickVolley and state.FlickGoal or state.TargetGoal or goal_for(false)) or nil
+    local goal = not is_throw and (state.VolleyGoal or (state.FlickVolley and state.FlickGoal) or state.TargetGoal or goal_for(false)) or nil
     local mouth = goal and get_mouth(goal)
     if mouth then target = safe_shot_target(target, mouth) end
     local constants=is_throw and modules.Throw.Constants or nil
@@ -1558,8 +1612,27 @@ local function choose_shot(target,goal)
             ball.LastKickerUserId=local_player.UserId
             local ok,entry,entered_at=pcall(modules.Physics.GetFirstBoxEntry,ball,boundary,goal,now,4,false)
             if ok and typeof(entry)=="Vector3" and type(entered_at)=="number" then
-                local miss=keeper_save_miss(ball,boundary,keeper,entry,entered_at,now)
-                if miss and miss>best_miss then best,best_miss=candidate,miss end
+                local blocked=false
+                local previous=origin
+                for sample=1,8 do
+                    local elapsed=(entered_at-now)*sample/8
+                    local ok_state,flight=pcall(modules.Physics.GetStateAtTime,ball,now+elapsed,boundary)
+                    if not ok_state or not flight or typeof(flight.Position)~="Vector3"then blocked=true break end
+                    for _,actor in ipairs(state.Actors)do
+                        if actor~=keeper and not actor.Friendly and actor.Root.Parent and not actor.Character:GetAttribute("Ragdolled")then
+                            local frame={CFrame=actor.Root.CFrame}
+                            local drift=actor.Root.AssemblyLinearVelocity*math.min(elapsed,.3)
+                            local ok_hit,hit=pcall(modules.Hitboxes.GetSegmentEnterAlpha,frame,modules.Hitboxes.Receive,previous-drift,flight.Position-drift)
+                            if ok_hit and hit~=nil then blocked=true break end
+                        end
+                    end
+                    if blocked then break end
+                    previous=flight.Position
+                end
+                if not blocked then
+                    local miss=keeper_save_miss(ball,boundary,keeper,entry,entered_at,now)
+                    if miss and miss>best_miss then best,best_miss=candidate,miss end
+                end
             end
         end
     end
@@ -1601,7 +1674,7 @@ local function aim_payload(original)
         return original
     end
     if config.AutoPass and state.PassTarget and state.PassTarget.Root.Parent then
-        local target = state.PassTarget.Root.Position + state.PassTarget.Root.AssemblyLinearVelocity * 0.15
+        local target = state.PassPoint or state.PassTarget.Root.Position + state.PassTarget.Root.AssemblyLinearVelocity * 0.15
         local origin = original and original.Origin or workspace.CurrentCamera.CFrame.Position
         local result = table.clone(original or {})
         result.Origin = origin
@@ -1628,7 +1701,7 @@ local function aim_payload(original)
         end
         return original
     end
-    if (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
+    if (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
         return solve_shot(shot_target(), nil, false, original) or original
     end
     return original
@@ -1637,8 +1710,28 @@ end
 local function rewrite_command(command)
     if type(command) ~= "table" then return end
     if state.MagnetSteal then return end
+    if config.AutoPass and state.PassInput and state.PassTarget and type(state.PassTarget.UserId)=="number"and state.PassTarget.Root.Parent
+        and (command.PassType=="FreeLowPass"or command.PassType=="AssistedPass")then
+        local target=state.PassPoint or state.PassTarget.Root.Position
+        local origin=typeof(command.ClientPosition)=="Vector3"and command.ClientPosition or modules.Renderer.GetPosition()
+        if typeof(origin)=="Vector3"and typeof(target)=="Vector3"and (target-origin).Magnitude>1 then
+            local reported=typeof(command.PlayerVelocity)=="Vector3"and command.PlayerVelocity or Vector3.zero
+            local ok,velocity,charge,aim=pcall(modules.AssistedPass.GetVelocityToTarget,local_player.Character,origin,target,reported,command.ChargeSeconds)
+            if ok and typeof(velocity)=="Vector3"and type(charge)=="number"then
+                local direction=typeof(aim)=="Vector3"and aim or (target-origin).Unit
+                local eye=type(command.AimDirection)=="table"and typeof(command.AimDirection.Origin)=="Vector3"and command.AimDirection.Origin or origin
+                command.AimDirection={Origin=eye,Direction=direction,CameraCFrame=CFrame.lookAt(eye,eye+direction),IsAirborne=false,TargetPosition=target}
+                command.KickDirection=flat(target-origin)
+                command.ChargeSeconds=charge
+                command.PassType="AssistedPass"
+                command.TargetUserId=state.PassTarget.UserId
+                command.TargetPosition=target
+                command.TargetData={TargetUserId=state.PassTarget.UserId,IsGuaranteedClosePass=false}
+            end
+        end
+    end
     if not is_goalkeeper() and command.PassType == "Shot" and shot_curve() then command.Curve = shot_curve() end
-    if not is_goalkeeper()and command.PassType == "Shot" and (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or (config.FeintShot and state.FeintActive)) and shot_target() then
+    if not is_goalkeeper()and command.PassType == "Shot" and (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() then
         local ray, _, _, direction, applied_curve = solve_shot(shot_target(), command.ChargeSeconds, false, command.AimDirection)
         if ray then
             command.AimDirection = ray
@@ -1655,7 +1748,7 @@ local function install_hooks()
             local args = table.pack(...)
             if character == local_player.Character and not state.MagnetSteal and not is_goalkeeper() and args[7] == nil then
                 if shot_curve() then args[12] = shot_curve() args.n = math.max(args.n, 12) end
-                if config.ShotAimbot or config.UnsavableShot or state.FlickVolley or (config.FeintShot and state.FeintActive and state.FeintCommitted) then
+                if config.ShotAimbot or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive and state.FeintCommitted) then
                     local target = shot_target()
                     local aim, _, _, direction, applied_curve = solve_shot(target, args[1], false, args[2])
                     if aim then args[2] = aim args[8] = direction args[9] = aim.TargetPosition args[12] = applied_curve args.n = math.max(args.n, 12) end
@@ -1704,6 +1797,7 @@ local function install_hooks()
                 if name=="Release"and type(command)=="table"and command.PassType=="Shot"then
                     if state.FlickVolley then state.FlickVolleyReleasedAt=os.clock() end
                     state.FlickVolley=false state.FlickShotTarget=nil state.FlickGoal=nil
+                    state.VolleyTarget=nil state.VolleyGoal=nil
                 end
                 return table.unpack(result,1,result.n)
             end
@@ -1719,6 +1813,7 @@ local function install_hooks()
             if not processed and modules.Controls.IsInput("Kick", input) then
                 if not modules.ClientShoot.IsCharging() then
                     state.FeintActive, state.FeintSide, state.FeintCommitted, state.FeintRealTarget = false, nil, false, nil
+                    state.ShotRandomSeed=math.random(1,2147483646)
                 end
                 if begin_shot_flick()then return true end
                 state.ShotInput = input
@@ -2044,6 +2139,9 @@ local function update_prediction()
     local ball_state, boundary = modules.Renderer.GetAuthoritativeMovementState()
     local now = modules.Clock.GetSmoothedServerTime()
     if not ball_state or not boundary or modules.Renderer.GetOwnedUserId() then
+        if state.Crossing and modules.Renderer.GetOwnedUserId() then
+            state.KeeperInterceptedAt=os.clock()
+        end
         table.clear(state.Points)
         state.Landing = nil
         state.Crossing = nil
@@ -2095,6 +2193,123 @@ local function attempt_keeper_dive(direction)
     return accepted==true
 end
 
+local function keeper_charge_crossing(goal,carrier)
+    if not carrier or type(debug.getupvalues)~="function"then return nil end
+    if not state.KeeperChargeSessions then
+        local ok,values=pcall(debug.getupvalues,modules.TackleEffects.UpdateChargePaths)
+        if ok and type(values)=="table"then
+            for _,value in pairs(values)do
+                if type(value)=="table"then
+                    local key,entry=next(value)
+                    if key==nil or (type(key)=="number"and type(entry)=="table"and entry.Preview~=nil)then
+                        state.KeeperChargeSessions=value
+                        break
+                    end
+                end
+            end
+        end
+    end
+    local sessions=state.KeeperChargeSessions
+    local session=sessions and sessions[carrier]
+    if type(session)~="table"or session.PassType~="Shot"or typeof(session.SolvedVelocity)~="Vector3"then return nil end
+    local character
+    for _,actor in ipairs(state.Actors)do
+        if actor.UserId==carrier and not actor.Friendly then character=actor.Character break end
+    end
+    if not character or session.Character~=character then return nil end
+    local launch=session.SolvedLaunchPosition or session.LaunchPosition
+    if typeof(launch)~="Vector3"then return nil end
+    local boundary=modules.Renderer.GetMatchBoundaryWorld()
+    local lobby=workspace:FindFirstChild("Lobby")
+    if lobby and goal:IsDescendantOf(lobby)then boundary=modules.PracticeBoundary.GetIfReady()or boundary end
+    if not boundary then return nil end
+    local now=modules.Clock.GetSmoothedServerTime()
+    local ok,position=pcall(function()
+        local ball=modules.Physics.NewState(launch,session.SolvedVelocity,modules.Physics.BallRadius,now,session.SolvedSpin or Vector3.zero)
+        return modules.Physics.GetFirstBoxEntry(ball,boundary,goal,now,2.5,false)
+    end)
+    if ok and typeof(position)=="Vector3"then return position,session.AimLockedAt~=nil end
+    return nil
+end
+
+local function keeper_position_step(root,goal,mouth,carrier)
+    if not config.KeeperAutoPosition then return false end
+    local forward=mouth.Forward
+    local mouthPosition=mouth.PlanePosition
+    if modules.Practice.IsActive()or modules.Practice.IsInWing()then
+        local center,count=Vector3.zero,0
+        for _,other in ipairs(modules.Practice.GetGoalParts()or {})do
+            if other~=goal and other.Parent and other.Parent.Name~="Defence"then
+                center+=other.Position
+                count+=1
+            end
+        end
+        if count>0 then forward=flat(center/count-goal.Position)or forward end
+        local extent=(math.abs(goal.CFrame.RightVector:Dot(forward))*goal.Size.X
+            +math.abs(goal.CFrame.UpVector:Dot(forward))*goal.Size.Y
+            +math.abs(goal.CFrame.LookVector:Dot(forward))*goal.Size.Z)*.5
+        mouthPosition=goal.Position+forward*extent
+    end
+    local lateral=Vector3.new(-forward.Z,0,forward.X)
+    local threat
+    if carrier then
+        for _,actor in ipairs(state.Actors)do
+            if actor.UserId==carrier and not actor.Friendly and actor.Root.Parent then
+                threat=actor.Root.Position+actor.Root.AssemblyLinearVelocity*.12
+                break
+            end
+        end
+    elseif not owns_ball()then
+        threat=modules.Renderer.GetPosition()
+    end
+    if threat and ((threat-mouthPosition).Magnitude>130 or (threat-mouthPosition):Dot(forward)<-2)then threat=nil end
+    local lateralOffset=threat and (threat-mouthPosition):Dot(lateral)or 0
+    local distance=threat and math.max(0,(threat-mouthPosition):Dot(forward))or 130
+    local weight=math.clamp((130-distance)/115,0,1)
+    local offset=math.clamp(lateralOffset*weight*.7,-mouth.HalfWidth*.75,mouth.HalfWidth*.75)
+    local depth=math.clamp(config.KeeperArcDepth+weight*2,2,10)
+    local shot,locked=keeper_charge_crossing(goal,carrier)
+    if shot then
+        local shotOffset=math.clamp((shot-mouthPosition):Dot(lateral),-mouth.HalfWidth*.85,mouth.HalfWidth*.85)
+        offset=offset+(shotOffset-offset)*(locked and .9 or .7)
+        depth=math.min(depth,config.KeeperArcDepth+1)
+    end
+    local target=mouthPosition+lateral*offset+forward*depth
+    local now=os.clock()
+    if state.KeeperPositionGoal~=goal then
+        state.KeeperPositionGoal=goal
+        state.KeeperPositionTarget=target
+        state.KeeperPositionAt=now
+        state.KeeperPositionMoving=false
+    end
+    local previous=state.KeeperPositionTarget or target
+    local deltaTime=math.clamp(now-(state.KeeperPositionAt or now),0,.2)
+    state.KeeperPositionAt=now
+    local alpha=1-math.exp(-deltaTime/(shot and (locked and .08 or .12)or .18))
+    local smoothed=previous:Lerp(target,alpha)
+    if (smoothed-previous).Magnitude<.04 then smoothed=previous end
+    state.KeeperPositionTarget=smoothed
+    local delta=Vector3.new(smoothed.X-root.Position.X,0,smoothed.Z-root.Position.Z)
+    local distanceToSpot=delta.Magnitude
+    local stopBand=shot and .4 or .65
+    local startBand=shot and .8 or 1.25
+    if state.KeeperPositionMoving then
+        if distanceToSpot<stopBand then state.KeeperPositionMoving=false end
+    elseif distanceToSpot>startBand then
+        state.KeeperPositionMoving=true
+    end
+    if state.KeeperPositionMoving and distanceToSpot>.01 then
+        local desired=delta.Unit*math.clamp((distanceToSpot-.35)/3,0,1)
+        local old=state.KeeperPositionDirection or desired
+        local steering=old:Lerp(desired,1-math.exp(-deltaTime/(shot and .08 or .12)))
+        state.KeeperPositionDirection=steering
+        state.MoveDirection=steering
+    else
+        state.KeeperPositionDirection=nil
+    end
+    return true
+end
+
 local function keeper_step()
     if not config.AutoGoalkeeper or not is_goalkeeper()or owns_ball()then return false end
     if modules.ClientShoot.IsCharging()or modules.Pass.IsCharging()or modules.Keeper.IsForcedClearActive()then return false end
@@ -2106,10 +2321,13 @@ local function keeper_step()
     if not mouth then return false end
     local carrier=modules.Renderer.GetOwnedUserId()
     if carrier~=state.KeeperCarrier then
+        if carrier and crossing then state.KeeperInterceptedAt=os.clock()end
         state.KeeperCarrier=carrier
         state.KeeperCarrierSince=os.clock()
     end
-    if config.KeeperDiveOnContact and carrier and os.clock()-(state.KeeperCarrierSince or 0)>=.35
+    if carrier then state.Crossing=nil end
+    local contactDelay=(state.KeeperInterceptedAt and os.clock()-state.KeeperInterceptedAt<1)and 1 or .35
+    if config.KeeperDiveOnContact and carrier and os.clock()-(state.KeeperCarrierSince or 0)>=contactDelay
         and not modules.Dive.IsDiveConstraintActive(root)
         and not modules.Tackle.IsSlideTackling()then
         local zone=goal.Parent and goal.Parent:FindFirstChild("Goalkeeper")
@@ -2145,8 +2363,7 @@ local function keeper_step()
             end
         end
     end
-    if not crossing then return false end
-    if carrier then state.Crossing=nil return false end
+    if carrier or not crossing then return keeper_position_step(root,goal,mouth,carrier)end
     local remaining=crossing.Time-modules.Clock.GetSmoothedServerTime()
     if remaining<=0 then state.Crossing=nil return false end
     local delta=crossing.Position-root.Position
@@ -2368,6 +2585,9 @@ local function automation_step()
         end
     elseif not modules.ClientShoot.IsCharging() then
         state.AutoShot = false
+        if state.VolleyTarget and os.clock()-(state.VolleyStartedAt or 0)>.3 then
+            state.VolleyTarget,state.VolleyGoal=nil,nil
+        end
     else
         state.FullChargeAt = nil
         if state.AutoShot and not within_shoot_range() then
@@ -2383,10 +2603,10 @@ local function automation_step()
     if state.PassInput then
         if not has_ball or not config.AutoPass then
             modules.Pass.CancelCharge()
-            state.PassInput, state.PassTarget = nil, nil
+            state.PassInput, state.PassTarget, state.PassPoint = nil, nil, nil
         elseif os.clock() >= state.PassReleaseAt then
             modules.Pass.HandleInputEnded(state.PassInput)
-            state.PassInput, state.PassTarget = nil, nil
+            state.PassInput, state.PassTarget, state.PassPoint = nil, nil, nil
         end
     end
     if modules.ItemUse.IsEquipped() then
@@ -2408,10 +2628,13 @@ local function automation_step()
             local teammate = best_teammate()
             if teammate then
                 state.PassTarget = teammate
+                local ok_target,target=pcall(modules.AssistedPass.GetTargetPosition,teammate.Character)
+                state.PassPoint=(ok_target and typeof(target)=="Vector3"and target or teammate.Root.Position)
+                    +teammate.Root.AssemblyLinearVelocity*.15
                 state.PassInput = modules.Controls.CreateInput("Pass")
                 state.PassReleaseAt = os.clock() + 0.3
                 modules.Pass.HandleInputBegan(state.PassInput, false)
-                if modules.Pass.IsCharging() then  else state.PassInput, state.PassTarget = nil, nil end
+                if not modules.Pass.IsCharging()then state.PassInput,state.PassTarget,state.PassPoint=nil,nil,nil end
             end
         end
     else
@@ -2429,12 +2652,28 @@ local function automation_step()
                 state.FlickVolley=false state.FlickShotTarget=nil state.FlickGoal=nil state.AutoShot=false
             end
         end
-        if config.AutoVolley and within_shoot_range() and not state.FlickVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.18) then
-            if modules.Volley.IsAvailable(local_player.Character) then
-                state.ShotInput = modules.Controls.CreateInput("Kick")
-                state.AutoShot = true
-                modules.ClientShoot.HandleInputBegan(state.ShotInput, false)
-                if modules.ClientShoot.IsCharging() then  end
+        local volley_goal=goal_for(false)
+        local volley_distance=volley_goal and (volley_goal.Position-root.Position).Magnitude or math.huge
+        if config.AutoVolley and volley_distance<=config.AutoVolleyRange and within_shoot_range()
+            and not state.FlickVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.5) then
+            local ok_evaluation,evaluation=pcall(modules.Volley.GetEvaluation,local_player.Character)
+            local humanoid=local_player.Character and local_player.Character:FindFirstChildOfClass("Humanoid")
+            local available=modules.Volley.IsAvailable(local_player.Character)
+            if available and ok_evaluation and type(evaluation)=="table"and evaluation.BallGrounded==false
+                and humanoid and humanoid.FloorMaterial~=Enum.Material.Air and ready("volley jump",.6)then
+                humanoid.Jump=true
+            elseif available then
+                state.VolleyTarget,state.VolleyGoal=select_shot()
+                if state.VolleyTarget then
+                    state.VolleyStartedAt=os.clock()
+                    state.ShotInput = modules.Controls.CreateInput("Kick")
+                    state.AutoShot = true
+                    modules.ClientShoot.HandleInputBegan(state.ShotInput, false)
+                    if not modules.ClientShoot.IsCharging()then
+                        state.AutoShot=false state.ShotInput=nil
+                        state.VolleyTarget,state.VolleyGoal=nil,nil
+                    end
+                end
             end
         end
         if ((config.AutoTackle and not is_goalkeeper()) or (config.KeeperAutoTackle and is_goalkeeper()))
@@ -2465,6 +2704,7 @@ end
 local function unload()
     if not state.Alive then return end
     state.Alive = false
+    if state.MouseUnlockCleanup then state.MouseUnlockCleanup()state.MouseUnlockCleanup=nil end
     if state.MobileGui then state.MobileGui:Destroy()state.MobileGui=nil end
     if library and library.FlushAutosave then pcall(function()library:FlushAutosave()end)end
     pcall(modules.Movement.ClearMultiplier,"AxisSoccerSpeed")
@@ -2499,11 +2739,23 @@ local function set_config(key,value)
         state.FlickPending=nil state.FlickVolley=false state.FlickShotTarget=nil
         state.FlickGoal=nil state.FlickJiggleSide=nil
     end
-    if key=="AutoPass"and not value then state.PassTarget=nil end
+    if key=="AutoPass"and not value then state.PassTarget=nil state.PassPoint=nil end
+    if key=="AutoVolley"and not value then
+        state.VolleyTarget,state.VolleyGoal=nil,nil
+        if state.AutoShot then pcall(modules.ClientShoot.CancelCharge)state.AutoShot=false end
+    end
     if key=="AutoDribble"and not value then table.clear(state.DribbleThreats) state.NextDribbleAt=nil end
     if key=="BallMagnet"and not value then state.MagnetDirection=nil state.MagnetStealTarget=nil end
-    if key=="AutoGoalkeeper"and not value then state.DiveDirection=nil state.MoveDirection=nil end
-    if key=="ShotCurve" or key=="CurveShot" or key=="CurveSide" or key=="FeintShot" then state.ShotSolution=nil state.ShotSearchAt=nil end
+    if key=="AutoGoalkeeper"and not value then
+        state.DiveDirection=nil state.MoveDirection=nil
+        state.KeeperPositionDirection=nil state.KeeperPositionMoving=false
+    end
+    if key=="KeeperAutoPosition"and not value then
+        state.MoveDirection=nil state.KeeperPositionDirection=nil
+        state.KeeperPositionTarget=nil state.KeeperPositionGoal=nil
+        state.KeeperPositionMoving=false
+    end
+    if key=="ShotCurve" or key=="CurveShot" or key=="CurveSide" or key=="FeintShot" or key=="ShotRandomizer" then state.ShotSolution=nil state.ShotSearchAt=nil end
     if key=="FeintShot" and not value then state.FeintActive, state.FeintSide = false, nil end
     if key=="InfiniteStamina"then modules.Sprint.SetUnlimitedStamina("AxisSoccer",value)end
     if key=="AntiRagdoll"and not value then modules.Movement.ClearServerRagdollSuppression("AxisSoccer")end
@@ -2574,9 +2826,12 @@ local ok, err = xpcall(function()
         if state.Alive then guarded("visuals", render_esp) end
     end)
     connect(local_player.CharacterRemoving, function()
-        state.ShotInput, state.PassInput, state.PassTarget = nil, nil, nil
+        state.ShotInput, state.PassInput, state.PassTarget, state.PassPoint = nil, nil, nil, nil
+        state.VolleyTarget,state.VolleyGoal=nil,nil
         state.MoveDirection, state.DiveDirection, state.Crossing = nil, nil, nil
-        state.KeeperCarrier, state.KeeperCarrierSince = nil, nil
+        state.KeeperCarrier, state.KeeperCarrierSince, state.KeeperInterceptedAt = nil, nil, nil
+        state.KeeperPositionTarget,state.KeeperPositionGoal,state.KeeperPositionDirection=nil,nil,nil
+        state.KeeperPositionMoving=false
         state.BallState, state.Boundary, state.Landing = nil, nil, nil
         state.AutoShot = false
         state.FeintCommitted, state.ShotSolution, state.DiveChoice = nil, nil, nil
