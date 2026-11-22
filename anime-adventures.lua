@@ -1,4 +1,4 @@
-local axisSource=[=====[if shared._axisUI and shared._axisGameReady and shared._axisUI.BuildVersion=="axis-aa-ui-6" and shared._axisUI.JobId==game.JobId then
+local axisSource=[=====[if shared._axisUI and shared._axisGameReady and shared._axisUI.BuildVersion=="axis-aa-ui-8" and shared._axisUI.JobId==game.JobId then
     shared._axisUI.Window.Native:SetOpen(true)
     return true
 end
@@ -80,7 +80,7 @@ local function createAxisUI(options)
         if library.RestoringConfig then return end
         return setOpen(self,value)
     end
-    local result={BuildVersion="axis-aa-ui-6",JobId=game.JobId,Lib=library,Window={},ConfigManager={},Controls={},Pages={},SectionCount=0,ControlCount=0}
+    local result={BuildVersion="axis-aa-ui-8",JobId=game.JobId,Lib=library,Window={},ConfigManager={},Controls={},Pages={},SectionCount=0,ControlCount=0}
     local closing=false
     local bindingControls={}
     local pendingColors={}
@@ -257,9 +257,17 @@ local function createAxisUI(options)
         table.clear(pendingColors)
     end
     function Section:AddParagraph(data)
-        local heading=self.Native:Label(tostring(data.Title or ""))
-        local label=self.Native:Label(tostring(data.Content or ""))
-        return {Link={AddHelper=function()end},SetContent=function(_,value)label:SetText(tostring(value or ""))end,SetText=function(_,value)label:SetText(tostring(value or ""))end,SetIcon=function()end}
+        local frame=Instance.new("Frame")
+        frame.Name="AxisStatus" frame.BackgroundTransparency=1 frame.Size=UDim2.new(1,0,0,0)
+        frame.AutomaticSize=Enum.AutomaticSize.Y frame.ZIndex=2 frame.Parent=self.Native.Items.Content.Instance
+        local padding=Instance.new("UIPadding")padding.PaddingTop=UDim.new(0,4)padding.PaddingBottom=UDim.new(0,6)padding.Parent=frame
+        local label=Instance.new("TextLabel")
+        label.BackgroundTransparency=1 label.Size=UDim2.new(1,0,0,0)label.AutomaticSize=Enum.AutomaticSize.Y
+        label.TextWrapped=true label.TextXAlignment=Enum.TextXAlignment.Left label.TextYAlignment=Enum.TextYAlignment.Top
+        label.FontFace=library.Font label.TextSize=12 label.TextColor3=library.Theme.Text label.TextTransparency=.3 label.ZIndex=3 label.Parent=frame
+        local function set(value)label.Text=tostring(value or "")end
+        set(data.Content)
+        return {Frame=frame,Text=label,Link={AddHelper=function()end},SetContent=function(_,v)set(v)end,SetText=function(_,v)set(v)end,SetIcon=function()end}
     end
     function Section:AddProgressBar(data)
         local label=self.Native:Label(tostring(data.Name or "Progress"))
@@ -282,17 +290,40 @@ local function createAxisUI(options)
     end
     local category="AUTOMATION"
     local groups={AUTOMATION="Automation",PLACEMENT="Automation",ABILITIES="Automation",BATTLE="Automation",MATCH="Automation",JOIN="Stages",STAGES="Stages",CHALLENGES="Stages",ENDLESS="Stages",EVENTS="Stages",REWARDS="Units",UNITS="Units",SHOPS="Units",MODS="Utility",VISUALS="Visuals",SETTINGS="Settings"}
-    local icons={Automation="112148279212860",Stages="112148279212860",Units="112148279212860",Utility="112148279212860",Visuals="112148279212860",Settings="112148279212860"}
+    local icons={Automation="7734051052",Stages="7733992829",Units="7743876054",Utility="7743878358",Visuals="7733774602",Settings="7734053495"}
     function result.Window:DrawCategory(data)category=data.Name end
     function result.Window:DrawTab(data)
         local group=groups[category] or "Utility"
         local page=result.Pages[group]
-        if not page then page=native:Page({Name=group,Icon=icons[group]}) result.Pages[group]=page page.AxisSections=0 end
+        if not page then
+            page=native:Page({Name=group,Icon=icons[group]})result.Pages[group]=page page.AxisSections=0
+            function page:Turn(active)
+                self.Active=active
+                self.Items.Page.Instance.Visible=active
+                self.Items.Page.Instance.Parent=active and native.Items.Content.Instance or library.UnusedHolder.Instance
+                self.Items.Page.Instance.Position=UDim2.new(0,0,0,0)
+                self.Items.Inactive.Instance.BackgroundTransparency=active and .25 or 1
+                if active then
+                    for _,section in pairs(self.Sections)do
+                        if not section.AxisPositionsReady then
+                            section.AxisPositionsReady=true
+                            task.spawn(function()
+                                for index,element in ipairs(section.Elements)do
+                                    if element.RefreshPosition then element:RefreshPosition(true)end
+                                    if index%12==0 then task.wait()end
+                                end
+                            end)
+                        end
+                    end
+                end
+            end
+        end
         local tab={Name=data.Name,Page=page}
         function tab:DrawSection(info)
             self.Page.AxisSections+=1
             result.SectionCount+=1
-            local section=self.Page:Section({Name=self.Name.." / "..tostring(info.Name or ""),Side=info.Position=="right" and 2 or 1})
+            local name=tostring(info.Name or self.Name):gsub("^Auto Play%s*/%s*","")
+            local section=self.Page:Section({Name=name,Side=info.Position=="right" and 2 or 1})
             return setmetatable({Native=section},{__index=Section})
         end
         return tab
@@ -36386,6 +36417,17 @@ do
 	end)
 end
 shared._axisGameContext=spilled.t15
+do
+    local generation=spilled.t15.Generation
+    task.spawn(function()
+        while spilled.t15.Running and spilled.t15.Generation==generation do
+            for worker,flag in pairs({start="AutoStart",matchend="AutoMatchEnd",diffvote="AutoDifficulty",skip="AutoSkip"})do
+                if t10[flag]==true then spilled.t15._wakeThrottled(worker,1)end
+            end
+            task.wait(1)
+        end
+    end)
+end
 installAxisTeleport(spilled.t15,v4247)
 shared._axisGameReady=true
 end
