@@ -46,7 +46,8 @@ return function(context)
     end
     local controls={}
     local bindsReady=false
-    local bound={ShotAimbot=true,AutoGoalkeeper=true,BallMagnet=true,SpeedBoost=true,ItemAimbot=true}
+    local bound={ShotAimbot=true,AutoGoalkeeper=true,BallMagnet=true,SpeedBoost=true,ItemAimbot=true,
+        AutoPlay=true,AutoFlick=true,AutoBicycle=true,TackleSpeed=true,IgnoreCorrections=true,HazardShield=true}
     local function toggle(section,key,name,color)
         local control=section:Toggle({Name=name,Flag="IS_"..key,Default=config[key],Callback=function(value)context.Set(key,value)end})
         controls[key]=control
@@ -62,23 +63,49 @@ return function(context)
         local control=section:Dropdown({Name=name,Flag="IS_"..key,Default=config[key],Items=items,Callback=function(value)context.Set(key,value)end})
         controls[key]=control
     end
+    local function multi(section,key,name,items)
+        local control=section:Dropdown({Name=name,Flag="IS_"..key,Default=config[key],Items=items,Multi=true,
+            Callback=function(value)context.Set(key,table.clone(value))end})
+        controls[key]=control
+    end
     local combat=window:Page({Name="Combat",Icon="134242818164054"})
     local shots=combat:Section({Name="Shooting",Side=1})
-    toggle(shots,"ShotAimbot","Enabled")
+    toggle(shots,"ShotAimbot","Shot redirect")
     toggle(shots,"ShotRandomizer","Placement variety")
     dropdown(shots,"ShotPlacement","Placement",{"Auto","Upper Left","Upper Right","Lower Left","Lower Right","Center"})
     dropdown(shots,"TargetPost","Target goal",{"Automatic","Team1","Team2"})
-    slider(shots,"ShootRange","Shoot range",25,250,5)
+    slider(shots,"ShootRange","Max distance",20,400,5)
+    slider(shots,"SuperchargeRange","Supercharge max distance",20,400,5)
+    slider(shots,"VolleyShotRange","Volley max distance",20,400,5)
+    multi(shots,"ShotTypes","Shots",{"Ground","First-Time","Volleys"})
+    toggle(shots,"ShotBoost","Power boost")
+    slider(shots,"ShotBoostMultiplier","Boost multiplier",1,1.5,.05)
     slider(shots,"ShotMargin","Post clearance",1.5,4,.1)
     toggle(shots,"UnsavableShot","Unsavable shot")
     toggle(shots,"PerfectCharge","Perfect charge")
     toggle(shots,"FlickShot","Flick shot")
     toggle(shots,"CurveShot","Curve shot")
-    dropdown(shots,"CurveSide","Curve side",{"Auto","Left","Right"})
+    dropdown(shots,"CurveSide","Curve side",{"Auto","Mine","Left","Right"})
     slider(shots,"ShotCurve","Curve strength",-100,100)
     toggle(shots,"FeintShot","Feint shot")
     slider(shots,"FeintChance","Feint chance (%)",0,100)
     toggle(shots,"ShotPreview","Shot preview","ShotColor")
+    local cancelShot
+    cancelShot=shots:Toggle({Name="Cancel shot",Flag="IS_CancelShot",Default=false,Callback=function(value)
+        if value and bindsReady then
+            context.CancelShot()
+            task.defer(function()if cancelShot and cancelShot.Value then cancelShot:Set(false)end end)
+        end
+    end})
+    local cancelBind=cancelShot:GetBind({Flag="IS_ShotCancelKey",Default=Enum.KeyCode.Backspace,Mode="Hold"})
+    context.Connect(input.InputBegan,function(event)
+        if not bindsReady or input:GetFocusedTextBox() or library.BindModal then return end
+        local key=cancelBind:Get()
+        if key~=tostring(Enum.KeyCode.Backspace)
+            and (tostring(event.KeyCode)==key or tostring(event.UserInputType)==key) then
+            cancelShot:Set(true)
+        end
+    end)
     local passing=combat:Section({Name="Passing",Side=2})
     toggle(passing,"AutoPass","Auto pass")
     slider(passing,"PassRange","Range",15,160)
@@ -89,10 +116,17 @@ return function(context)
     toggle(passing,"KeeperClearAimbot","Keeper clear aim")
     toggle(passing,"AutoCallForPass","Call for pass")
     slider(passing,"CallInterval","Call interval",1,8,.1)
+    local tricks=combat:Section({Name="Tricks",Side=2})
+    toggle(tricks,"AutoBicycle","Auto bicycle kick")
+    slider(tricks,"BicycleRange","Bicycle range",20,160,5)
+    toggle(tricks,"AutoFlick","Auto flick")
+    slider(tricks,"AutoFlickRange","Auto flick range",4,20,1)
     local defense=combat:Section({Name="Defense",Side=1})
     toggle(defense,"TackleAimbot","Tackle aim")
     toggle(defense,"AutoTackle","Auto tackle")
-    slider(defense,"TackleRange","Tackle range",4,24)
+    slider(defense,"TackleRange","Tackle range",5,27)
+    toggle(defense,"TackleSpeed","Tackle speed")
+    slider(defense,"TackleSpeedMultiplier","Tackle multiplier",1,1.5,.05)
     toggle(defense,"AutoDribble","Auto dribble")
     slider(defense,"DribbleRange","Dribble range",5,25)
     local keeper=combat:Section({Name="Goalkeeper",Side=2})
@@ -120,6 +154,7 @@ return function(context)
     slider(players,"SkeletonThickness","Thickness",1,4,.1)
     toggle(players,"PlayerTracers","Tracers","TracerColor")
     toggle(players,"ShowTeammates","Teammates","TeamColor")
+    toggle(players,"TackleWarning","Tackle warning","WarningColor")
     slider(players,"ESPDistance","Max distance",50,2000)
     local chams=visuals:Section({Name="Chams",Side=2})
     toggle(chams,"PlayerChams","Enabled","ChamsColor")
@@ -128,10 +163,31 @@ return function(context)
     toggle(chams,"PlayerGlow","Glow","GlowColor")
     toggle(chams,"PlayerShader","Shader chams","ShaderColor")
     local ball=visuals:Section({Name="Ball",Side=2})
+    local function cosmeticNames(folder)
+        local names={"Default"}
+        local cosmetics=game:GetService("ReplicatedStorage"):FindFirstChild("Cosmetics")
+        local catalog=cosmetics and cosmetics:FindFirstChild(folder)
+        if catalog then
+            for _,item in ipairs(catalog:GetChildren())do
+                if item.Name~="Default" then names[#names+1]=item.Name end
+            end
+            table.sort(names,function(a,b)
+                if a=="Default" then return b~="Default" end
+                if b=="Default" then return false end
+                return a<b
+            end)
+        end
+        return names
+    end
     toggle(ball,"BallESP","Ball ESP","BallColor")
     toggle(ball,"FlightPath","Flight path","PathColor")
     slider(ball,"FlightPathSeconds","Prediction seconds",.5,5,.1)
     toggle(ball,"LandingMarker","Landing marker","LandingColor")
+    toggle(ball,"BallChanger","Ball changer")
+    dropdown(ball,"BallSkin","Ball skin",cosmeticNames("Balls"))
+    local effects=visuals:Section({Name="Goal effect",Side=2})
+    toggle(effects,"GoalEffectChanger","Goal effect changer")
+    dropdown(effects,"GoalEffect","Goal effect",cosmeticNames("Goal Effects"))
     local world=visuals:Section({Name="World items",Side=1})
     toggle(world,"ItemBoxESP","Item boxes","ItemBoxColor")
     toggle(world,"WorldItemESP","World items","ItemColor")
@@ -139,7 +195,8 @@ return function(context)
     local utility=window:Page({Name="Utility",Icon="112148279212860"})
     local movement=utility:Section({Name="Movement",Side=1})
     toggle(movement,"SpeedBoost","Speed boost")
-    slider(movement,"SpeedMultiplier","Multiplier",1,2.5,.05)
+    slider(movement,"SpeedMultiplier","Multiplier",1,2,.05)
+    toggle(movement,"IgnoreCorrections","Ignore position corrections")
     toggle(movement,"AntiRagdoll","Anti ragdoll")
     toggle(movement,"AutoSprint","Auto sprint")
     toggle(movement,"InfiniteStamina","Infinite stamina")
@@ -150,8 +207,21 @@ return function(context)
     slider(possession,"MagnetRange","Range",4,24)
     slider(possession,"MagnetStealRange","Steal distance",2,5,.1)
     slider(possession,"MagnetCooldown","Cooldown",.3,2,.1)
+    local automation=utility:Section({Name="Automation",Side=2})
+    toggle(automation,"AutoPlay","Auto play")
+    local hazards=utility:Section({Name="Hazards",Side=1})
+    toggle(hazards,"HazardShield","Hazard shield")
+    dropdown(hazards,"HazardMode","Mode",{"Walk Over","Block"})
+    toggle(hazards,"HazardESP","Hazard ESP","HazardColor")
     library:CreateSettingsPage(window)
     local settings=window.Pages[#window.Pages]:Section({Name="Session",Side=2})
+    local menuKey
+    menuKey=settings:Keybind({Name="Menu key",Flag="IS_MenuKey",Default=Enum.KeyCode.RightShift,
+        Mode="Toggle",Callback=function()
+            if not bindsReady then return end
+            local key=menuKey:Get()
+            if key and key~=tostring(Enum.KeyCode.Backspace) then library.MenuKeybind=key end
+        end})
     settings:Button({Name="Disable all",Callback=function()
         for key,control in pairs(controls)do if typeof(config[key])=="boolean"then control:Set(false)end end
     end})
@@ -229,6 +299,9 @@ return function(context)
     end
     window:Init()
     bindsReady=true
+    if cancelShot.Value then cancelShot:Set(false)end
+    local restoredMenuKey=menuKey:Get()
+    if restoredMenuKey and restoredMenuKey~=tostring(Enum.KeyCode.Backspace) then library.MenuKeybind=restoredMenuKey end
     return {Library=library,Window=window,Controls=controls}
 end
 ]=],
@@ -262,7 +335,10 @@ return function(context)
         local entry={Bones={}}
         entry.Box=create("Frame",{BackgroundTransparency=1,BorderSizePixel=0,Visible=false,ZIndex=2},overlay)
         entry.Stroke=create("UIStroke",{Thickness=1,Color=config.EnemyColor},entry.Box)
-        entry.Name=text()entry.Distance=text()entry.Tracer=line()
+        entry.Name=text()entry.Distance=text()entry.Tags=text()entry.Tracer=line()
+        entry.Warning=create("Highlight",{Adornee=model,FillTransparency=1,
+            OutlineColor=config.WarningColor,Enabled=false,
+            DepthMode=Enum.HighlightDepthMode.AlwaysOnTop},model)
         entry.Health=create("Frame",{BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(16,17,20),Visible=false,ZIndex=2},overlay)
         entry.Fill=create("Frame",{BorderSizePixel=0,AnchorPoint=Vector2.new(0,1),Position=UDim2.fromScale(0,1),BackgroundColor3=config.HealthColor},entry.Health)
         for _,pair in ipairs(links)do
@@ -273,7 +349,7 @@ return function(context)
         return entry
     end
     local function remove(entry)
-        for _,key in ipairs({"Box","Name","Distance","Tracer","Health"})do entry[key]:Destroy()end
+        for _,key in ipairs({"Box","Name","Distance","Tags","Tracer","Health","Warning"})do entry[key]:Destroy()end
         for _,bone in ipairs(entry.Bones)do bone.Line:Destroy()end
         entry.Chams:Destroy()
     end
@@ -284,13 +360,16 @@ return function(context)
     local function render(camera,origin)
         local seen={}
         local any=config.PlayerESP or config.PlayerNames or config.PlayerDistance or config.PlayerHealth or config.PlayerSkeletons
-            or config.PlayerTracers or config.PlayerChams or config.PlayerGlow or config.PlayerShader
+            or config.PlayerTracers or config.PlayerChams or config.PlayerGlow or config.PlayerShader or config.TackleWarning
         if any then for _,actor in ipairs(state.Actors)do
             local model=actor.Character
             if model.Parent and actor.Root.Parent and(not actor.Friendly or config.ShowTeammates)and(actor.Root.Position-origin).Magnitude<=config.ESPDistance then
                 seen[model]=true
                 local entry=entries[model]or makeEntry(model)
-                entry.Box.Visible=false entry.Name.Visible=false entry.Distance.Visible=false entry.Tracer.Visible=false entry.Health.Visible=false
+                entry.Box.Visible=false entry.Name.Visible=false entry.Distance.Visible=false entry.Tags.Visible=false entry.Tracer.Visible=false entry.Health.Visible=false
+                entry.Warning.Enabled=config.TackleWarning and state.HadBall and actor.Threat
+                    and not actor.Friendly and (actor.Root.Position-origin).Magnitude<25
+                entry.Warning.OutlineColor=config.WarningColor
                 for _,bone in ipairs(entry.Bones)do bone.Line.Visible=false end
                 local color=actor.Friendly and config.TeamColor or config.EnemyColor
                 local top,topVisible=project(camera,actor.Root.Position+Vector3.new(0,3.5,0))
@@ -300,8 +379,12 @@ return function(context)
                     local x,y=top.X-width/2,math.min(top.Y,bottom.Y)
                     entry.Box.Position=UDim2.fromOffset(x,y)entry.Box.Size=UDim2.fromOffset(width,height)
                     entry.Stroke.Color=color entry.Box.Visible=config.PlayerESP
-                    entry.Name.Text=actor.Name..(actor.Keeper and " · GK"or "")entry.Name.TextColor3=config.NameColor
+                    entry.Name.Text=actor.Name entry.Name.TextColor3=config.NameColor
                     entry.Name.Position=UDim2.fromOffset(top.X,y-2)entry.Name.Visible=config.PlayerNames
+                    entry.Tags.Text=table.concat(actor.Tags or {}," · ")
+                    entry.Tags.TextColor3=color
+                    entry.Tags.Position=UDim2.fromOffset(top.X,y+height+36)
+                    entry.Tags.Visible=config.PlayerNames and #entry.Tags.Text>0
                     entry.Distance.Text=string.format("%dm",math.floor((actor.Root.Position-origin).Magnitude/3.57))
                     entry.Distance.TextColor3=config.DistanceColor entry.Distance.Position=UDim2.fromOffset(top.X,y+height+18)entry.Distance.Visible=config.PlayerDistance
                     local humanoid=model:FindFirstChildOfClass("Humanoid")
@@ -460,8 +543,21 @@ if env.AxisIllegalSoccer then
 end
 assert(game.GameId == 10155360168, "Illegal Soccer: unsupported universe")
 local queue_teleport = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
-if queue_teleport then
-    pcall(queue_teleport, 'loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/5f4d88230f244edad4322df84b85dc0f.lua"))()')
+if type(queue_teleport)=="function" and env.AxisIllegalSoccerQueuedJob~=game.JobId then
+    local queued=pcall(queue_teleport,[==[
+if not game:IsLoaded()then game.Loaded:Wait()end
+if game.GameId~=10155360168 then return end
+local environment=getgenv()
+if environment.AxisRankedLoaderJob==game.JobId then return end
+environment.AxisRankedLoaderJob=game.JobId
+local ok=pcall(function()
+    local source=game:HttpGet("https://raw.githubusercontent.com/lofaif1234/axisui/main/login-loader.lua",true)
+    local run=loadstring(source,"Axis login")
+    if run then run()end
+end)
+if not ok then environment.AxisRankedLoaderJob=nil end
+]==])
+    if queued then env.AxisIllegalSoccerQueuedJob=game.JobId end
 end
 
 local players = game:GetService("Players")
@@ -488,6 +584,7 @@ local state = {
     Items = {},
     Next = {},
     Points = {},
+    Bounces = {},
     Version = "1.0.0",
 }
 local config = {
@@ -498,14 +595,21 @@ local config = {
     SkeletonColor=Color3.fromRGB(65,155,255),TracerColor=Color3.fromRGB(65,155,255),ChamsColor=Color3.fromRGB(65,155,255),
     GlowColor=Color3.fromRGB(65,155,255),ShaderColor=Color3.fromRGB(65,155,255),ShotColor=Color3.fromRGB(65,155,255),
     LandingColor=Color3.fromRGB(103,227,198),ProjectileColor=Color3.fromRGB(255,130,90),ItemBoxColor=Color3.fromRGB(190,156,255),ItemFOVColor=Color3.new(1,1,1),
-    ShotAimbot = false, ShotPlacement = "Auto", ShotRandomizer = false, TargetPost = "Automatic", ShootRange = 110,
+    ShotAimbot = false, ShotPlacement = "Auto", ShotRandomizer = false, TargetPost = "Automatic", ShootRange = 400,
+    SuperchargeRange = 400, VolleyShotRange = 400, ShotTypes = {"Ground"}, ShotBoost = false, ShotBoostMultiplier = 1.5,
     UnsavableShot = false, PerfectCharge = false, AutoPass = false, SafePass = false, PassClearance = 7,
     CurveShot = false, CurveSide = "Auto", ShotCurve = 70, FeintShot = false, FeintChance = 50, FlickShot = false, KeeperAutoTackle = false, KeeperTackleRange = 12,
     KeeperDiveOnContact = true, KeeperDiveRange = 10, KeeperAutoPosition = false, KeeperArcDepth = 6,
     AutoVolley = false, AutoVolleyRange = 80, TackleAimbot = false, AutoTackle = false,
+    AutoBicycle = false, BicycleRange = 80, AutoFlick = false, AutoFlickRange = 10,
+    TackleSpeed = false, TackleSpeedMultiplier = 1.5,
     AutoDribble = false, AutoGoalkeeper = false, KeeperClearAimbot = false,
     AutoCallForPass = false, AutoSprint = false, InfiniteStamina = false,
     NoBallSlowdown = false, FullSpeedCharge = false, BallMagnet = false,
+    AutoPlay = false, IgnoreCorrections = false, HazardShield = false, HazardMode = "Walk Over",
+    HazardESP = false, HazardColor = Color3.fromRGB(255,85,85),
+    BallChanger = false, BallSkin = "Default", GoalEffectChanger = false, GoalEffect = "Default",
+    TackleWarning = false, WarningColor = Color3.fromRGB(255,120,70),
     FlightPath = false, FlightPathSeconds = 3, LandingMarker = false,
     ShotPreview = false, BallESP = false, PlayerESP = false,
     PlayerTracers = false, PlayerChams = false, ItemBoxESP = false,
@@ -605,7 +709,30 @@ local modules = {
     ItemUse = module("Client.Gameplay.ItemUseState"),
     Ragdoll = module("Modules.Characters.Ragdoll"),
     RainbowFlick = module("Modules.Actions.RainbowFlick"),
+    BicycleKick = module("Modules.Actions.BicycleKick"),
+    Remotes = module("Modules.Remotes"),
+    GoalEffects = module("Client.Gameplay.Visual.GoalEffect"),
 }
+local tackle_constants=modules.SlideTackle.Constants
+local original_tackle_distance=tackle_constants.Distance
+local original_tackle_dash=tackle_constants.StartupDashDistance
+local disabled_corrections={}
+local function set_correction_block(enabled)
+    if enabled then
+        local remote=modules.Remotes.Get("Characters","MovementCorrection")
+        for _,connection in ipairs(getconnections(remote.OnClientEvent))do
+            if not disabled_corrections[connection] then
+                connection:Disable()
+                disabled_corrections[connection]=true
+            end
+        end
+    else
+        for connection in pairs(disabled_corrections)do
+            pcall(function()connection:Enable()end)
+            disabled_corrections[connection]=nil
+        end
+    end
+end
 
 local function patch(target, key, factory)
     local original = assert(target[key], "Missing function: " .. key)
@@ -660,6 +787,7 @@ end
 local function refresh_actors()
     local list = {}
     local team = modules.ActorTeams.GetActorTeamName(local_player)
+    local owner=modules.Renderer.GetOwnedUserId()
     for _, character in modules.Actors.GetAllCharacterModels() do
         local root = root_of(character)
         local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -674,12 +802,21 @@ local function refresh_actors()
                 end
                 local name = actor.DisplayName
                 if not name or name == "" then name = character.Name == "PracticeBot" and "Practice Bot" or character.Name end
+                local charging=modules.ActionCharge.IsCharging({Character=character})
+                local sliding=modules.SlideTackle.GetSlidingUntil(character)~=nil
+                local tags={}
+                if owner==modules.Actors.GetUserId(actor) then tags[#tags+1]="BALL" end
+                if charging then tags[#tags+1]="KICK" end
+                if sliding then tags[#tags+1]="SLIDE" end
+                if character:GetAttribute("Ragdolled") then tags[#tags+1]="DOWN" end
+                if character:GetAttribute("ActiveGoalkeeper")==true then tags[#tags+1]="GK" end
                 list[#list + 1] = {
                     Character = character, Root = root, Actor = actor,
                     UserId = modules.Actors.GetUserId(actor), Team = actor_team,
                     Friendly = friendly,
                     Name = name,
                     Keeper = character:GetAttribute("ActiveGoalkeeper") == true,
+                    Tags=tags,Threat=charging or sliding,
                 }
             end
         end
@@ -746,12 +883,34 @@ local function shot_clearance()
     return math.max(modules.Physics.BallRadius + .8, config.ShotMargin)
 end
 
+local function shot_mode()
+    local character=local_player.Character
+    if state.FlickVolley or state.VolleyTarget or character and not owns_ball()
+        and modules.Volley.IsAvailable(character) then return "Volleys" end
+    if state.ShotStartedWithBall==false then return "First-Time" end
+    return "Ground"
+end
+
+local function shot_redirect_enabled()
+    return config.ShotAimbot and table.find(config.ShotTypes,shot_mode())~=nil
+end
+
 local function within_shoot_range(goal)
     goal=goal or goal_for(false)
     local root=local_root()
     if not goal or not root then return false end
+    local range=shot_mode()=="Volleys" and config.VolleyShotRange or config.ShootRange
+    if modules.KickPowerups.GetMultiplier(local_player.Character)>1 then
+        range=config.SuperchargeRange
+    end
+    if range>=400 then return true end
     local offset=goal.Position-root.Position
-    return Vector3.new(offset.X,0,offset.Z).Magnitude<=config.ShootRange
+    return Vector3.new(offset.X,0,offset.Z).Magnitude<=range
+end
+
+local function shot_boost_active()
+    return config.ShotBoost and not is_goalkeeper()
+        and (state.ShotInput~=nil or state.AutoShot or shot_redirect_enabled())
 end
 
 local function safe_shot_target(target, mouth)
@@ -798,7 +957,8 @@ local function select_shot()
     local damping=math.max(tuning.AirDamping or 0,0)
     local gravity=math.abs(tuning.Gravity.Y)
     local horizontalMultiplier=modules.KickPowerups.GetVelocityMultipliers(modules.KickPowerups.GetMultiplier(character))
-    local speed=modules.Shoot.Constants.Shot.MaximumSpeed*horizontalMultiplier*.94
+    local boost=shot_boost_active() and config.ShotBoostMultiplier or 1
+    local speed=modules.Shoot.Constants.Shot.MaximumSpeed*horizontalMultiplier*boost*.94
     local inherited=modules.KickCore.GetInheritedVelocity(character,nil)
     local keeperReach=keeper and modules.Dive.GetDistance(keeper.Character)or 0
     local contactReach=modules.Dive.Constants.SaveReachStuds
@@ -891,13 +1051,15 @@ local function select_flick_shot()
     return safe_shot_target(Vector3.new(position.X,height,position.Z),mouth),goal,side
 end
 
-local function best_teammate()
+local function best_teammate(require_call)
     local root = local_root()
     local goal = goal_for(false)
     if not root then return nil end
+    if require_call and (not state.PassCaller or os.clock()>(state.PassCallUntil or 0)) then return nil end
     local best, best_score = nil, -math.huge
     for _, actor in state.Actors do
-        if actor.Friendly and actor.Root.Parent and not actor.Character:GetAttribute("Ragdolled") then
+        if actor.Friendly and actor.Root.Parent and not actor.Character:GetAttribute("Ragdolled")
+            and (not require_call or actor.UserId==state.PassCaller) then
             local ok_target,assisted=pcall(modules.AssistedPass.GetTargetPosition,actor.Character)
             local destination=ok_target and typeof(assisted)=="Vector3"and assisted or actor.Root.Position
             local distance = (destination - root.Position).Magnitude
@@ -914,10 +1076,10 @@ local function best_teammate()
                         clearance=math.min(clearance,(relative+velocity*time).Magnitude)
                     end
                 end
-                if config.SafePass and clearance<config.PassClearance then continue end
+                local blocked=config.SafePass and clearance<config.PassClearance
                 local progress = goal and ((root.Position - goal.Position).Magnitude - (actor.Root.Position - goal.Position).Magnitude) or 0
                 local score = math.min(clearance,40)*1.4 + progress * 0.4 - distance * 0.12
-                if score > best_score then best, best_score = actor, score end
+                if score > best_score then best, best_score = actor, score state.PassLob=blocked end
             end
         end
     end
@@ -1087,6 +1249,12 @@ end
 
 local function shot_curve()
     if state.MagnetSteal or not config.CurveShot or not within_shoot_range() or config.ShotCurve==0 or (state.FeintActive and not state.FeintCommitted) then return nil end
+    if shot_boost_active() then
+        local root=local_root()
+        local goal=goal_for(false)
+        if root and goal and (root.Position-goal.Position).Magnitude>50 then return 0 end
+    end
+    if config.CurveSide=="Mine" then return state.NativeCurve end
     local amount=math.clamp(math.abs(config.ShotCurve)/100,0,1)
     local goal=state.TargetGoal
     local target=state.ShotProbeTarget or (state.FeintActive and state.FeintCommitted and state.FeintRealTarget or state.ShotTarget)
@@ -1164,7 +1332,7 @@ local function pivot_crossing(origin,velocity,spin,plane,normal,tuning)
     local previous=origin
     local distance=(origin-plane):Dot(normal)
     if distance<=0 then return nil end
-    for step=1,50 do
+    for step=1,120 do
         local position=modules.Physics.GetAirFlight(origin,velocity,spin,step*.05,tuning)
         if typeof(position)~="Vector3" then return nil end
         local remaining=(position-plane):Dot(normal)
@@ -1183,7 +1351,7 @@ local function pivot_entry(origin,velocity,spin,goal,boundary)
     local now=modules.Clock.GetSmoothedServerTime()
     local ball=modules.Physics.NewState(origin,velocity,modules.Physics.BallRadius,now,spin)
     ball.LastKickerUserId=local_player.UserId
-    return modules.Physics.GetFirstBoxEntry(ball,boundary,goal,now,2.5,true)
+    return modules.Physics.GetFirstBoxEntry(ball,boundary,goal,now,6,true)
 end
 
 local function pivot_solve_once(target,charge,initial_aim,goal,mouth,requested)
@@ -1349,7 +1517,7 @@ local function predict_shot_crossing(origin,velocity,charge,goal)
     local spin=modules.Shoot.GetSpin(local_player.Character,velocity,nil,shot_curve(),charge)
     local ball=modules.Physics.NewState(origin,velocity,modules.Physics.BallRadius,now,spin)
     ball.LastKickerUserId=local_player.UserId
-    return modules.Physics.GetFirstBoxEntry(ball,boundary,goal,now,4,false)
+    return modules.Physics.GetFirstBoxEntry(ball,boundary,goal,now,6,false)
 end
 
 local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
@@ -1423,7 +1591,7 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
         aim.CameraCFrame=CFrame.lookAt(origin,origin+aim.Direction)
     end
     velocity=raw_velocity(character,charge,aim,origin,horizontal,vertical,nil,constants,direction,target,nil,nil,not is_throw and shot_curve() or nil)
-    if mouth and (target - origin).Magnitude <= 160 then
+    if mouth and (target - origin).Magnitude <= 400 then
         local _, boundary = modules.Renderer.GetAuthoritativeMovementState()
         local lobby = workspace:FindFirstChild("Lobby")
         if goal and lobby and goal:IsDescendantOf(lobby) then boundary = modules.PracticeBoundary.GetIfReady() or boundary end
@@ -1445,8 +1613,8 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
                 local normal_speed = speed:Dot(mouth.Forward)
                 if math.abs(normal_speed) < .01 then return nil end
                 local time = (mouth.PlanePosition - start):Dot(mouth.Forward) / normal_speed
-                if time <= 0 or time > 4 then return nil end
-                local spin = modules.Shoot.GetSpin(character, speed, nil, curve, charge)
+                if time <= 0 or time > 6 then return nil end
+                local spin = raw_spin(character, speed, nil, curve, charge)
                 local ball = modules.Physics.NewState(start, speed, modules.Physics.BallRadius, 0, spin)
                 ball.LastKickerUserId = local_player.UserId
                 local sample
@@ -1457,7 +1625,7 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
                     local rate = sample.Velocity:Dot(mouth.Forward)
                     if math.abs(rate) < .01 then return nil end
                     time -= depth / rate
-                    if time <= 0 or time > 4 then return nil end
+                    if time <= 0 or time > 6 then return nil end
                 end
                 if not sample or math.abs((sample.Position - mouth.PlanePosition):Dot(mouth.Forward)) > .1 then return nil end
                 local error_x = (sample.Position - target):Dot(mouth.Lateral)
@@ -1577,7 +1745,7 @@ local function keeper_save_miss(ball,boundary,keeper,entry,entered_at,now)
 end
 
 local function choose_shot(target,goal)
-    if not target or not goal or config.ShotPlacement~="Auto" or not config.ShotAimbot then return target end
+    if not target or not goal or config.ShotPlacement~="Auto" or not shot_redirect_enabled() then return target end
     local keeper
     local team=select(2,goal_for(false))
     for _,actor in ipairs(state.Actors)do
@@ -1701,7 +1869,7 @@ local function aim_payload(original)
         end
         return original
     end
-    if (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
+    if (shot_redirect_enabled() or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
         return solve_shot(shot_target(), nil, false, original) or original
     end
     return original
@@ -1710,11 +1878,25 @@ end
 local function rewrite_command(command)
     if type(command) ~= "table" then return end
     if state.MagnetSteal then return end
+    if command.PassType=="Shot" and type(command.Curve)=="number" then state.NativeCurve=command.Curve end
     if config.AutoPass and state.PassInput and state.PassTarget and type(state.PassTarget.UserId)=="number"and state.PassTarget.Root.Parent
         and (command.PassType=="FreeLowPass"or command.PassType=="AssistedPass")then
         local target=state.PassPoint or state.PassTarget.Root.Position
         local origin=typeof(command.ClientPosition)=="Vector3"and command.ClientPosition or modules.Renderer.GetPosition()
         if typeof(origin)=="Vector3"and typeof(target)=="Vector3"and (target-origin).Magnitude>1 then
+            if state.PassLob then
+                local direction=flat(target-origin)
+                local eye=type(command.AimDirection)=="table"and typeof(command.AimDirection.Origin)=="Vector3"
+                    and command.AimDirection.Origin or origin
+                command.PassType="FreeLobPass"
+                command.AimDirection={Origin=eye,Direction=direction,
+                    CameraCFrame=CFrame.lookAt(eye,eye+direction),TargetPosition=target}
+                command.KickDirection=direction
+                command.TargetPosition=target
+                command.TargetUserId=nil
+                command.TargetData=nil
+                return
+            end
             local reported=typeof(command.PlayerVelocity)=="Vector3"and command.PlayerVelocity or Vector3.zero
             local ok,velocity,charge,aim=pcall(modules.AssistedPass.GetVelocityToTarget,local_player.Character,origin,target,reported,command.ChargeSeconds)
             if ok and typeof(velocity)=="Vector3"and type(charge)=="number"then
@@ -1731,27 +1913,50 @@ local function rewrite_command(command)
         end
     end
     if not is_goalkeeper() and command.PassType == "Shot" and shot_curve() then command.Curve = shot_curve() end
-    if not is_goalkeeper()and command.PassType == "Shot" and (config.ShotAimbot or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() then
+    if not is_goalkeeper()and command.PassType == "Shot" and (shot_redirect_enabled() or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() then
         local ray, _, _, direction, applied_curve = solve_shot(shot_target(), command.ChargeSeconds, false, command.AimDirection)
         if ray then
             command.AimDirection = ray
             command.KickDirection = direction
             command.TargetPosition = ray.TargetPosition
             command.Curve = applied_curve
+            state.CommittedShotCurve=applied_curve
+            state.CommittedShotAt=os.clock()
         end
     end
 end
 
 local function install_hooks()
+    patch(modules.GoalEffects,"Play",function(original)
+        return function(name,position,goal_part)
+            if config.GoalEffectChanger and config.GoalEffect~="Default"
+                and os.clock()-(state.LastShotAt or -math.huge)<6 then
+                name=config.GoalEffect
+            end
+            return original(name,position,goal_part)
+        end
+    end)
+    patch(modules.KickCore,"GetLaunchMultiplier",function(original)
+        return function(kind,character)
+            local multiplier=original(kind,character)
+            if character==local_player.Character and kind==modules.KickCore.LaunchKinds.Kick
+                and shot_boost_active() then
+                return multiplier*math.clamp(config.ShotBoostMultiplier,1,1.5)
+            end
+            return multiplier
+        end
+    end)
     patch(modules.Shoot, "GetVelocity", function(original)
         return function(character, ...)
             local args = table.pack(...)
             if character == local_player.Character and not state.MagnetSteal and not is_goalkeeper() and args[7] == nil then
                 if shot_curve() then args[12] = shot_curve() args.n = math.max(args.n, 12) end
-                if config.ShotAimbot or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive and state.FeintCommitted) then
+                if shot_redirect_enabled() or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive and state.FeintCommitted) then
                     local target = shot_target()
                     local aim, _, _, direction, applied_curve = solve_shot(target, args[1], false, args[2])
-                    if aim then args[2] = aim args[8] = direction args[9] = aim.TargetPosition args[12] = applied_curve args.n = math.max(args.n, 12) end
+                    if aim then
+                        args[2] = aim args[8] = direction args[9] = aim.TargetPosition args[12] = applied_curve args.n = math.max(args.n, 12)
+                    end
                 end
             end
             return original(character, table.unpack(args, 1, args.n))
@@ -1759,9 +1964,14 @@ local function install_hooks()
     end)
     patch(modules.Shoot, "GetSpin", function(original)
         return function(character, velocity, movement, curve, charge)
-            if character == local_player.Character and not state.MagnetSteal and not is_goalkeeper() and shot_curve() then
+            if character == local_player.Character and not state.MagnetSteal and not is_goalkeeper() and config.CurveShot then
                 local solved=state.ShotSolution
-                curve=solved and os.clock()-solved.At<.15 and solved.AppliedCurve or shot_curve()
+                if state.CommittedShotCurve and os.clock()-(state.CommittedShotAt or 0)<.6 and not state.ShotProbeTarget then
+                    curve=state.CommittedShotCurve
+                else
+                    curve=solved and os.clock()-solved.At<1 and typeof(velocity)=="Vector3"
+                        and (velocity-solved.Velocity).Magnitude<2 and solved.AppliedCurve or shot_curve()
+                end
             end
             return original(character, velocity, movement, curve, charge)
         end
@@ -1798,6 +2008,8 @@ local function install_hooks()
                     if state.FlickVolley then state.FlickVolleyReleasedAt=os.clock() end
                     state.FlickVolley=false state.FlickShotTarget=nil state.FlickGoal=nil
                     state.VolleyTarget=nil state.VolleyGoal=nil
+                    state.ShotStartedWithBall=nil
+                    state.NativeCurve=nil
                 end
                 return table.unpack(result,1,result.n)
             end
@@ -1814,6 +2026,7 @@ local function install_hooks()
                 if not modules.ClientShoot.IsCharging() then
                     state.FeintActive, state.FeintSide, state.FeintCommitted, state.FeintRealTarget = false, nil, false, nil
                     state.ShotRandomSeed=math.random(1,2147483646)
+                    state.ShotStartedWithBall=owns_ball()
                 end
                 if begin_shot_flick()then return true end
                 state.ShotInput = input
@@ -1934,12 +2147,56 @@ end
 
 local world = create("Folder", {Name = "AxisSoccerVisuals"}, workspace)
 state.World = world
+local hazard_objects={}
+local function update_hazards()
+    local misc=workspace:FindFirstChild("Misc")
+    local folder=misc and misc:FindFirstChild("Items")
+    local active={}
+    if folder and (config.HazardShield or config.HazardESP) then
+        for _,item in ipairs(folder:GetChildren())do
+            local id=item:GetAttribute("PlacedItemId")
+            if id=="landmines" or id=="oilspill" or id=="oil_spill" then
+                local part=item:FindFirstChild("Center") or item.PrimaryPart
+                if part and part:IsA("BasePart") then
+                    active[item]=true
+                    local entry=hazard_objects[item]
+                    if not entry then
+                        local shield=create("Part",{Name="HazardShield",Anchored=true,
+                            CanCollide=true,CanTouch=false,CanQuery=false,Transparency=1},world)
+                        local highlight=create("Highlight",{Adornee=item,
+                            DepthMode=Enum.HighlightDepthMode.AlwaysOnTop},world)
+                        entry={Shield=shield,Highlight=highlight}
+                        hazard_objects[item]=entry
+                    end
+                    local size=part.Size
+                    entry.Shield.Size=config.HazardMode=="Walk Over"
+                        and Vector3.new(math.max(size.X,5),.4,math.max(size.Z,5))
+                        or Vector3.new(math.max(size.X,5),4,math.max(size.Z,5))
+                    entry.Shield.CFrame=part.CFrame*CFrame.new(0,
+                        config.HazardMode=="Walk Over" and 2 or 1.5,0)
+                    entry.Shield.CanCollide=config.HazardShield
+                    entry.Highlight.Enabled=config.HazardESP
+                    entry.Highlight.FillColor=config.HazardColor
+                    entry.Highlight.OutlineColor=config.HazardColor
+                end
+            end
+        end
+    end
+    for item,entry in pairs(hazard_objects)do
+        if not active[item] then
+            entry.Shield:Destroy()
+            entry.Highlight:Destroy()
+            hazard_objects[item]=nil
+        end
+    end
+end
 local overlay = create("ScreenGui", {
     Name = "AxisSoccerOverlay", ResetOnSpawn = false,
     IgnoreGuiInset = true, DisplayOrder = 90, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, gui_parent)
 local esp_entries = {}
 local path_lines = {}
+local bounce_labels = {}
 
 local function label(parent, text, color)
     return create("TextLabel", {
@@ -2099,6 +2356,7 @@ local function render_esp()
     fov_circle.Position = UDim2.fromOffset(camera.ViewportSize.X * modules.Reticle.GunScreenPosition.X, camera.ViewportSize.Y * modules.Reticle.GunScreenPosition.Y)
     fov_circle.Size = UDim2.fromOffset(config.ItemAimFOV * 2, config.ItemAimFOV * 2)
     for _, segment in path_lines do segment.Visible = false end
+    for _, marker in bounce_labels do marker.Visible = false end
     if config.FlightPath then
         for i = 2, #state.Points do
             local a, a_visible = project(camera, state.Points[i - 1])
@@ -2111,6 +2369,14 @@ local function render_esp()
                 end
                 set_line(segment, a, b, config.PathColor, 2)
             end
+        end
+        for i,position in ipairs(state.Bounces)do
+            local marker=bounce_labels[i]
+            if not marker then marker=label(overlay,"BOUNCE",config.PathColor)bounce_labels[i]=marker end
+            local point,visible=project(camera,position)
+            marker.Position=UDim2.fromOffset(point.X,point.Y-8)
+            marker.TextColor3=config.PathColor
+            marker.Visible=visible
         end
     end
     landing_label.Visible = false
@@ -2133,6 +2399,7 @@ end
 local function update_prediction()
     if not (config.FlightPath or config.LandingMarker or config.AutoGoalkeeper or config.BallMagnet) then
         table.clear(state.Points)
+        table.clear(state.Bounces)
         state.Landing = nil
         return
     end
@@ -2143,6 +2410,7 @@ local function update_prediction()
             state.KeeperInterceptedAt=os.clock()
         end
         table.clear(state.Points)
+        table.clear(state.Bounces)
         state.Landing = nil
         state.Crossing = nil
         return
@@ -2152,13 +2420,18 @@ local function update_prediction()
     state.Boundary = boundary
     state.BallTime = now
     table.clear(state.Points)
+    table.clear(state.Bounces)
     if config.FlightPath then
         state.Points[1] = current.Position
         local sample = current
         local step = 0.06
         for i = 1, math.ceil(config.FlightPathSeconds / step) do
+            local before=sample
             sample = modules.Physics.GetStateAtTime(sample, now + i * step, boundary)
             state.Points[#state.Points + 1] = sample.Position
+            if before.Velocity.Y<-.5 and sample.Velocity.Y>.5 then
+                state.Bounces[#state.Bounces+1]=sample.Position
+            end
             if sample.Mode == "Resting" then break end
         end
     end
@@ -2512,6 +2785,33 @@ end
 
 local function automation_step()
     state.MoveDirection = nil
+    if ready("ball skin",.25) then
+        local owned=config.BallChanger and config.BallSkin~="Default" and owns_ball()
+        if owned then
+            local ball_id=modules.Renderer.GetMatchBallId()
+            if ball_id then
+                if state.SkinBallId and state.SkinBallId~=ball_id then
+                    pcall(modules.Renderer.SetSkin,state.SkinBallId,state.OriginalBallSkin)
+                    state.SkinBallId=nil
+                end
+                if not state.SkinBallId then
+                    state.SkinBallId=ball_id
+                    state.OriginalBallSkin=modules.Renderer.GetSkinName(ball_id)
+                end
+                if modules.Renderer.GetSkinName(ball_id)~=config.BallSkin then
+                    modules.Renderer.SetSkin(ball_id,config.BallSkin)
+                end
+            end
+        elseif state.SkinBallId then
+            pcall(modules.Renderer.SetSkin,state.SkinBallId,state.OriginalBallSkin)
+            state.SkinBallId=nil
+            state.OriginalBallSkin=nil
+        end
+    end
+    local tackle_scale=config.TackleSpeed and not is_goalkeeper()
+        and math.clamp(config.TackleSpeedMultiplier,1,1.5) or 1
+    tackle_constants.Distance=original_tackle_distance*tackle_scale
+    tackle_constants.StartupDashDistance=original_tackle_dash*tackle_scale
     if state.MagnetStealInput and (not config.BallMagnet or owns_ball()
         or not modules.ClientShoot.IsCharging()or os.clock()>=(state.MagnetStealReleaseAt or 0))then
         local input=state.MagnetStealInput
@@ -2618,14 +2918,69 @@ local function automation_step()
         return
     end
     if not keeper_step() and not state.FlickPending then magnet_step() end
+    if config.AutoPlay and not is_goalkeeper() and root and not state.MoveDirection then
+        local destination
+        if has_ball then
+            local goal=goal_for(false)
+            destination=goal and goal.Position
+        else
+            local owner=modules.Renderer.GetOwnedUserId()
+            local friendly=false
+            for _,actor in ipairs(state.Actors)do
+                if actor.UserId==owner then friendly=actor.Friendly break end
+            end
+            if not friendly then
+                local ball=modules.Renderer.GetPosition()
+                local velocity=state.BallState and state.BallState.Velocity
+                destination=ball and ball+(typeof(velocity)=="Vector3" and velocity*.12 or Vector3.zero)
+            end
+        end
+        if destination then
+            local delta=Vector3.new(destination.X-root.Position.X,0,destination.Z-root.Position.Z)
+            if delta.Magnitude>4 then state.MoveDirection=delta.Unit end
+        end
+    end
     if has_ball then
+        if config.AutoPlay and not is_goalkeeper() and within_shoot_range()
+            and os.clock()>=(state.CancelShotUntil or 0)
+            and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging()
+            and ready("auto play shot",1.2) then
+            state.ShotInput=modules.Controls.CreateInput("Kick")
+            state.AutoShot=true
+            modules.ClientShoot.HandleInputBegan(state.ShotInput,false)
+            if not modules.ClientShoot.IsCharging() then
+                state.AutoShot=false
+                state.ShotInput=nil
+            end
+        end
+        if config.AutoFlick and not is_goalkeeper() and ready("auto flick",.3)
+            and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() then
+            local nearest=enemy_near(root.Position,config.AutoFlickRange)
+            if nearest then
+                local toward=flat(nearest.Root.Position-root.Position)
+                if toward and toward:Dot(root.CFrame.LookVector)>.45
+                    and modules.Controls.IsRainbowFlickUnlocked()
+                    and not modules.Controls.IsOnCooldown("RainbowFlick") then
+                    if not state.NativeFlick then
+                        for _,callback in ipairs(getgc(true))do
+                            if type(callback)=="function" and debug.info(callback,"n")=="beginRainbowFlick"
+                                and debug.info(callback,"s")=="ReplicatedStorage.Client.Gameplay.Gameplay"then
+                                state.NativeFlick=callback
+                                break
+                            end
+                        end
+                    end
+                    if state.NativeFlick then pcall(state.NativeFlick) end
+                end
+            end
+        end
         if config.AutoDribble and not state.FlickPending and not is_goalkeeper()
             and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging()
             and state.PossessionSince and os.clock()-state.PossessionSince>.04 then
             guarded("auto dribble",dribble_step,root)
         end
         if config.AutoPass and not state.FlickPending and not state.PassInput and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and not modules.Dodge.IsDribbling() and ready("pass", 1.1) then
-            local teammate = best_teammate()
+            local teammate = best_teammate(true)
             if teammate then
                 state.PassTarget = teammate
                 local ok_target,target=pcall(modules.AssistedPass.GetTargetPosition,teammate.Character)
@@ -2654,15 +3009,21 @@ local function automation_step()
         end
         local volley_goal=goal_for(false)
         local volley_distance=volley_goal and (volley_goal.Position-root.Position).Magnitude or math.huge
-        if config.AutoVolley and volley_distance<=config.AutoVolleyRange and within_shoot_range()
+        if (config.AutoVolley or config.AutoBicycle) and volley_distance<=(config.AutoBicycle and config.BicycleRange or config.AutoVolleyRange) and within_shoot_range()
             and not state.FlickVolley and not modules.ClientShoot.IsCharging() and not modules.Pass.IsCharging() and ready("volley", 0.5) then
             local ok_evaluation,evaluation=pcall(modules.Volley.GetEvaluation,local_player.Character)
             local humanoid=local_player.Character and local_player.Character:FindFirstChildOfClass("Humanoid")
             local available=modules.Volley.IsAvailable(local_player.Character)
-            if available and ok_evaluation and type(evaluation)=="table"and evaluation.BallGrounded==false
+            local bicycle=config.AutoBicycle and available and ok_evaluation and type(evaluation)=="table"
+                and evaluation.BallGrounded==false and modules.BicycleKick.CanBicycleKick(local_player.Character,humanoid)
+            if config.AutoBicycle and available and ok_evaluation and type(evaluation)=="table"
+                and evaluation.BallGrounded==false and not bicycle and humanoid
+                and humanoid.FloorMaterial~=Enum.Material.Air and ready("bicycle jump",.6) then
+                humanoid.Jump=true
+            elseif available and ok_evaluation and type(evaluation)=="table"and evaluation.BallGrounded==false
                 and humanoid and humanoid.FloorMaterial~=Enum.Material.Air and ready("volley jump",.6)then
                 humanoid.Jump=true
-            elseif available then
+            elseif available and (config.AutoVolley or bicycle) then
                 state.VolleyTarget,state.VolleyGoal=select_shot()
                 if state.VolleyTarget then
                     state.VolleyStartedAt=os.clock()
@@ -2707,7 +3068,11 @@ local function unload()
     if state.MouseUnlockCleanup then state.MouseUnlockCleanup()state.MouseUnlockCleanup=nil end
     if state.MobileGui then state.MobileGui:Destroy()state.MobileGui=nil end
     if library and library.FlushAutosave then pcall(function()library:FlushAutosave()end)end
+    if state.SkinBallId then pcall(modules.Renderer.SetSkin,state.SkinBallId,state.OriginalBallSkin)end
     pcall(modules.Movement.ClearMultiplier,"AxisSoccerSpeed")
+    set_correction_block(false)
+    tackle_constants.Distance=original_tackle_distance
+    tackle_constants.StartupDashDistance=original_tackle_dash
     pcall(modules.Movement.ClearServerRagdollSuppression,"AxisSoccer")
     if player_visuals then pcall(player_visuals.Cleanup)end
     for _, connection in state.Connections do connection:Disconnect() end
@@ -2735,6 +3100,23 @@ end
 
 local function set_config(key,value)
     config[key]=value
+    if key=="AutoPlay" then
+        local bundled={"BallMagnet","AutoDribble","AutoPass","AutoTackle","AutoSprint",
+            "ShotAimbot","PerfectCharge","AutoVolley","SpeedBoost"}
+        if value then
+            state.AutoPlaySaved={}
+            for _,name in ipairs(bundled)do
+                state.AutoPlaySaved[name]=config[name]
+                if ui_controls[name] then ui_controls[name]:Set(true) else config[name]=true end
+            end
+        elseif state.AutoPlaySaved then
+            for _,name in ipairs(bundled)do
+                local old=state.AutoPlaySaved[name]
+                if ui_controls[name] then ui_controls[name]:Set(old) else config[name]=old end
+            end
+            state.AutoPlaySaved=nil
+        end
+    end
     if key=="FlickShot"and not value then
         state.FlickPending=nil state.FlickVolley=false state.FlickShotTarget=nil
         state.FlickGoal=nil state.FlickJiggleSide=nil
@@ -2758,6 +3140,7 @@ local function set_config(key,value)
     if key=="ShotCurve" or key=="CurveShot" or key=="CurveSide" or key=="FeintShot" or key=="ShotRandomizer" then state.ShotSolution=nil state.ShotSearchAt=nil end
     if key=="FeintShot" and not value then state.FeintActive, state.FeintSide = false, nil end
     if key=="InfiniteStamina"then modules.Sprint.SetUnlimitedStamina("AxisSoccer",value)end
+    if key=="IgnoreCorrections"then set_correction_block(value)end
     if key=="AntiRagdoll"and not value then modules.Movement.ClearServerRagdollSuppression("AxisSoccer")end
     if key=="SpeedBoost"and not value then modules.Movement.ClearMultiplier("AxisSoccerSpeed")end
     if key=="AutoSprint"and not value and state.OwnedSprintToggle then
@@ -2766,7 +3149,15 @@ local function set_config(key,value)
     end
 end
 local function build_ui()
-    local ui=assert(loadstring(Sources.UI))()({Config=config,State=state,Set=set_config,Unload=unload,Connect=connect})
+    local ui=assert(loadstring(Sources.UI))()({Config=config,State=state,Set=set_config,Unload=unload,Connect=connect,
+        CancelShot=function()
+            state.CancelShotUntil=os.clock()+.6
+            if modules.ClientShoot.IsCharging() then modules.ClientShoot.CancelCharge() end
+            state.ShotInput=nil
+            state.AutoShot=false
+            state.FullChargeAt=nil
+            state.ShotStartedWithBall=nil
+        end})
     library,window,ui_controls=ui.Library,ui.Window,ui.Controls
     state.Window=window
     player_visuals=assert(loadstring(Sources.Visuals))()({Config=config,State=state,Overlay=overlay,Create=create,Chams=Sources.Chams})
@@ -2787,6 +3178,18 @@ local ok, err = xpcall(function()
     install_hooks()
     refresh_actors()
     refresh_items()
+    local pass_call=modules.Remotes.GetGroup("Ball").CallForPassEffect
+    if pass_call and pass_call.OnClientEvent then
+        connect(pass_call.OnClientEvent,function(caller)
+            local user_id=type(caller)=="number" and caller
+                or typeof(caller)=="Instance" and caller:IsA("Player") and caller.UserId
+                or type(caller)=="table" and (caller.UserId or caller.userId)
+            if type(user_id)=="number" and user_id~=local_player.UserId then
+                state.PassCaller=user_id
+                state.PassCallUntil=os.clock()+1.2
+            end
+        end)
+    end
     local accumulator = 0
     local function mark_dribble(model,active)
         if not config.AutoDribble or not owns_ball() or typeof(model)~="Instance" or not model:IsA("Model") or model==local_player.Character then return end
@@ -2808,9 +3211,10 @@ local ok, err = xpcall(function()
         accumulator = 0
         if ready("actors", 0.35) then guarded("actors", refresh_actors) end
         if ready("world", 0.5) then guarded("world", refresh_items) end
+        if ready("hazards", 0.3) then guarded("hazards", update_hazards) end
         if ready("target", 0.08) then
             guarded("targets", function()
-                if config.ShotAimbot or config.UnsavableShot or config.ShotPreview or config.FeintShot or config.CurveShot then
+                if shot_redirect_enabled() or config.UnsavableShot or config.ShotPreview or config.FeintShot or config.CurveShot then
                     local target,goal=select_shot()
                     target=choose_shot(target,goal)
                     if state.TargetGoal~=goal or not target or not state.ShotTarget or(target-state.ShotTarget).Magnitude>.1 then state.ShotCrossing=nil end
