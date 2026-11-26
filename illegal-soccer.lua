@@ -86,7 +86,6 @@ return function(context)
     toggle(shots,"FlickShot","Flick shot")
     toggle(shots,"CurveShot","Curve shot")
     dropdown(shots,"CurveSide","Curve side",{"Auto","Mine","Left","Right"})
-    slider(shots,"ShotCurve","Curve strength",-100,100)
     toggle(shots,"FeintShot","Feint shot")
     slider(shots,"FeintChance","Feint chance (%)",0,100)
     toggle(shots,"ShotPreview","Shot preview","ShotColor")
@@ -181,6 +180,7 @@ return function(context)
     end
     toggle(ball,"BallESP","Ball ESP","BallColor")
     toggle(ball,"FlightPath","Flight path","PathColor")
+    toggle(ball,"FlightPathText","Flight path text")
     slider(ball,"FlightPathSeconds","Prediction seconds",.5,5,.1)
     toggle(ball,"LandingMarker","Landing marker","LandingColor")
     toggle(ball,"BallChanger","Ball changer")
@@ -563,6 +563,7 @@ end
 local players = game:GetService("Players")
 local run_service = game:GetService("RunService")
 local input_service = game:GetService("UserInputService")
+local mobile_device = input_service.TouchEnabled and not input_service.KeyboardEnabled
 local http_service = game:GetService("HttpService")
 local collection_service = game:GetService("CollectionService")
 local local_player = players.LocalPlayer
@@ -598,7 +599,7 @@ local config = {
     ShotAimbot = false, ShotPlacement = "Auto", ShotRandomizer = false, TargetPost = "Automatic", ShootRange = 400,
     SuperchargeRange = 400, VolleyShotRange = 400, ShotTypes = {"Ground"}, ShotBoost = false, ShotBoostMultiplier = 1.5,
     UnsavableShot = false, PerfectCharge = false, AutoPass = false, SafePass = false, PassClearance = 7,
-    CurveShot = false, CurveSide = "Auto", ShotCurve = 70, FeintShot = false, FeintChance = 50, FlickShot = false, KeeperAutoTackle = false, KeeperTackleRange = 12,
+    CurveShot = false, CurveSide = "Auto", FeintShot = false, FeintChance = 50, FlickShot = false, KeeperAutoTackle = false, KeeperTackleRange = 12,
     KeeperDiveOnContact = true, KeeperDiveRange = 10, KeeperAutoPosition = false, KeeperArcDepth = 6,
     AutoVolley = false, AutoVolleyRange = 80, TackleAimbot = false, AutoTackle = false,
     AutoBicycle = false, BicycleRange = 80, AutoFlick = false, AutoFlickRange = 10,
@@ -610,7 +611,7 @@ local config = {
     HazardESP = false, HazardColor = Color3.fromRGB(255,85,85),
     BallChanger = false, BallSkin = "Default", GoalEffectChanger = false, GoalEffect = "Default",
     TackleWarning = false, WarningColor = Color3.fromRGB(255,120,70),
-    FlightPath = false, FlightPathSeconds = 3, LandingMarker = false,
+    FlightPath = false, FlightPathText = true, FlightPathSeconds = 3, LandingMarker = false,
     ShotPreview = false, BallESP = false, PlayerESP = false,
     PlayerTracers = false, PlayerChams = false, ItemBoxESP = false,
     WorldItemESP = false, ProjectileESP = false, ESPDistance = 600,
@@ -996,7 +997,7 @@ local function select_shot()
     local ranked={}
     local randomizer=config.ShotRandomizer and Random.new(state.ShotRandomSeed or 1)
     for _,fraction in ipairs({-.95,.95,-.72,.72,-.45,.45,0})do
-        for _,height in ipairs({low,middle,high})do
+        for _,height in ipairs({low,low+(high-low)*.25,middle,low+(high-low)*.75,high})do
             local offset=randomizer and randomizer:NextNumber(-1.5,1.5)or 0
             local candidate=point(math.clamp(width*fraction+offset,-width,width),height)
             local score=difficulty(candidate)
@@ -1247,26 +1248,95 @@ local function item_target()
     return best
 end
 
-local function shot_curve()
-    if state.MagnetSteal or not config.CurveShot or not within_shoot_range() or config.ShotCurve==0 or (state.FeintActive and not state.FeintCommitted) then return nil end
-    if shot_boost_active() then
-        local root=local_root()
-        local goal=goal_for(false)
-        if root and goal and (root.Position-goal.Position).Magnitude>50 then return 0 end
-    end
-    if config.CurveSide=="Mine" then return state.NativeCurve end
-    local amount=math.clamp(math.abs(config.ShotCurve)/100,0,1)
-    local goal=state.TargetGoal
-    local target=state.ShotProbeTarget or (state.FeintActive and state.FeintCommitted and state.FeintRealTarget or state.ShotTarget)
+local function shot_curve(target,charge)
+    if state.MagnetSteal or not config.CurveShot or not within_shoot_range()
+        or(state.FeintActive and not state.FeintCommitted)then return nil end
+    if config.CurveSide=="Mine"then return state.NativeCurve end
+    local root=local_root()
+    local character=local_player.Character
+    local goal=state.TargetGoal or goal_for(false)
     local mouth=goal and get_mouth(goal)
-    if not mouth or not target then return config.ShotCurve<0 and -amount or amount end
-    local origin=local_root()
-    if not origin then return config.ShotCurve<0 and -amount or amount end
-    local toward=flat(mouth.PlanePosition-origin.Position)
-    if not toward then return config.ShotCurve<0 and -amount or amount end
-    local side=(target-mouth.PlanePosition):Dot(Vector3.yAxis:Cross(toward))<0 and 1 or -1
-    if config.CurveSide=="Left" then side=1 elseif config.CurveSide=="Right" then side=-1 end
-    return side*amount*(config.ShotCurve<0 and -1 or 1)
+    if not root or not mouth or not character then return 0 end
+    target=target or state.ShotProbeTarget or(state.FeintActive and state.FeintCommitted and state.FeintRealTarget or state.ShotTarget)
+    if not shot_redirect_enabled()and not state.ShotProbeTarget then
+        local camera=workspace.CurrentCamera
+        local aim=camera and camera.CFrame.LookVector
+        local denominator=aim and aim:Dot(mouth.Forward)
+        if denominator and math.abs(denominator)>.01 then
+            local distance=(mouth.PlanePosition-camera.CFrame.Position):Dot(mouth.Forward)/denominator
+            if distance>0 then target=safe_shot_target(camera.CFrame.Position+aim*distance,mouth)end
+        end
+    end
+    if not target then return 0 end
+    local origin=root.Position
+    local delta=target-origin
+    local direction=flat(delta)
+    local distance=Vector3.new(delta.X,0,delta.Z).Magnitude
+    if not direction or distance<10 then return 0 end
+    charge=charge or modules.Shoot.GetChargeSecondsFromAlpha(1,character)
+    local power=modules.KickPowerups.GetMultiplier(character)
+    local clock=os.clock()
+    local cached=state.AdaptiveCurve
+    if cached and clock-cached.At<.08 and cached.Side==config.CurveSide and cached.Power==power
+        and math.abs(cached.Charge-charge)<.005 and(origin-cached.Origin).Magnitude<.4
+        and(target-cached.Target).Magnitude<.25 then return cached.Value end
+    local tuning=modules.Physics.GetCharacterTuning(character)
+    local damping=math.max(0,tuning.AirDamping or 0)
+    local constants=modules.KickCore.Constants
+    local charge_constants=modules.KickPowerups.GetChargeConstants(character,constants)or constants
+    local horizontal=modules.KickPowerups.GetVelocityMultipliers(power)
+    local speeds=modules.Shoot.Constants.Shot
+    local speed=modules.KickCore.GetChargedSpeed(speeds.MinimumSpeed,speeds.MaximumSpeed,charge,charge_constants,
+        modules.KickCore.LaunchKinds and modules.KickCore.LaunchKinds.Kick,character)*horizontal
+    if shot_boost_active()then speed*=config.ShotBoostMultiplier end
+    local movement=modules.CharacterMotion.GetVelocity(character)or Vector3.zero
+    speed=math.max(20,speed+modules.KickCore.GetInheritedVelocity(character,movement):Dot(direction))
+    local flight=damping>.0001 and -math.log(math.max(.08,1-distance*damping/speed))/damping or distance/speed
+    flight=math.clamp(flight,.08,2.8)
+    local across=Vector3.yAxis:Cross(direction)
+    local goalSide=(target-mouth.PlanePosition):Dot(across)
+    local sign=goalSide<0 and 1 or -1
+    if math.abs(goalSide)<.5 then
+        local yaw=flat(root.CFrame.LookVector)
+        sign=yaw and yaw:Dot(across)>0 and -1 or 1
+    end
+    if config.CurveSide=="Left"then sign=1 elseif config.CurveSide=="Right"then sign=-1 end
+    local incidence=1-math.abs(direction:Dot(mouth.Forward))
+    local desired=distance*(.018+.045*incidence)+math.min(math.abs(goalSide)*.09,1.8)
+    local nearestKeeper,keeperDistance
+    for _,actor in ipairs(state.Actors)do
+        if actor.Keeper and actor.Root.Parent and not actor.Friendly then
+            local gap=(actor.Root.Position-mouth.PlanePosition).Magnitude
+            if not keeperDistance or gap<keeperDistance then nearestKeeper,keeperDistance=actor,gap end
+        end
+    end
+    if nearestKeeper and keeperDistance<60 then
+            local velocity=nearestKeeper.Root.AssemblyLinearVelocity
+            local moving=velocity:Dot(across)
+            local away=(target-nearestKeeper.Root.Position):Dot(across)
+            if moving*away<0 then desired+=math.min(math.abs(moving)*flight*.12,1.5)end
+    end
+    desired=math.clamp(desired,.15,math.max(.3,math.min(6,mouth.HalfWidth*.38)))
+    desired*=math.clamp((distance-10)/25,0,1)
+    local scaled=modules.Shoot.GetPowerScaledCurve(1,charge,character)
+    local baseSpin=modules.KickCore.GetSideSpin(character,movement,0)or 0
+    local fullSpin=(modules.KickCore.GetSideSpin(character,movement,scaled)or 0)-baseSpin
+    local velocity=direction*speed+Vector3.new(0,math.abs(tuning.Gravity.Y)*flight*.5,0)
+    local function bend(amount)
+        local spin=Vector3.new(0,baseSpin+fullSpin*sign*amount,0)
+        local middle=modules.Physics.GetAirFlight(origin,velocity,spin,flight*.5,tuning)
+        local finish=modules.Physics.GetAirFlight(origin,velocity,spin,flight,tuning)
+        if typeof(middle)~="Vector3"or typeof(finish)~="Vector3"then return 0 end
+        return math.abs((middle-(origin+finish)*.5):Dot(across))
+    end
+    local low,high=0,1
+    if math.abs(fullSpin)>.001 and bend(1)>desired then
+        for _=1,7 do local middle=(low+high)*.5 if bend(middle)<desired then low=middle else high=middle end end
+    elseif math.abs(fullSpin)<=.001 then high=0 end
+    local amount=sign*(low+high)*.5
+    if high==1 and low==0 then amount=sign end
+    state.AdaptiveCurve={At=clock,Origin=origin,Target=target,Charge=charge,Power=power,Side=config.CurveSide,Value=amount}
+    return amount
 end
 
 local feint_random=Random.new()
@@ -1496,7 +1566,7 @@ local function pivot_solve_once(target,charge,initial_aim,goal,mouth,requested)
 end
 
 local function pivot_solve(target,charge,initial_aim,goal,mouth)
-    local requested=shot_curve() or 0
+    local requested=shot_curve(target,charge) or 0
     local signs=requested~=0 and config.CurveSide=="Auto" and {requested,-requested} or {requested}
     for _,curve in ipairs(signs)do
         local ok,aim,velocity,origin,direction,applied=pcall(pivot_solve_once,target,charge,initial_aim,goal,mouth,curve)
@@ -1531,10 +1601,12 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
     local now=os.clock()
     local position=modules.CharacterMotion.GetPosition(character)
     local characterVelocity=modules.CharacterMotion.GetVelocity(character)
+    local curve_key=shot_curve(target,charge)
     local cached=state.ShotSolution
-    if cached and cached.Character==character and cached.IsThrow==is_throw and cached.Curve==shot_curve() and now-cached.At<.035
+    if cached and cached.Character==character and cached.IsThrow==is_throw and cached.Curve==curve_key and now-cached.At<(mobile_device and .065 or .035)
         and math.abs(cached.Charge-charge)<.001 and(cached.Target-target).Magnitude<.02
-        and position and(position-cached.Position).Magnitude<.04 and(characterVelocity-cached.CharacterVelocity).Magnitude<.1 then
+        and position and(position-cached.Position).Magnitude<(mobile_device and .12 or .04)
+        and(characterVelocity-cached.CharacterVelocity).Magnitude<(mobile_device and .25 or .1)then
         return table.clone(cached.Aim),cached.Velocity,cached.Origin,cached.Direction,cached.AppliedCurve
     end
     if not is_throw and goal and mouth then
@@ -1545,7 +1617,7 @@ local function solve_shot(target,charge,is_throw,initial_aim,post_retry)
                 state.ShotCrossing=predict_shot_crossing(pivot_origin,pivot_velocity,charge,state.TargetGoal)
             end
             if position then
-                state.ShotSolution={Character=character,IsThrow=false,Curve=shot_curve(),AppliedCurve=pivot_curve,At=now,Charge=charge,Target=target,Position=position,
+                state.ShotSolution={Character=character,IsThrow=false,Curve=curve_key,AppliedCurve=pivot_curve,At=now,Charge=charge,Target=target,Position=position,
                     CharacterVelocity=characterVelocity,Aim=table.clone(pivot_aim),Velocity=pivot_velocity,Origin=pivot_origin,Direction=pivot_direction}
             end
             return pivot_aim,pivot_velocity,pivot_origin,pivot_direction,pivot_curve
@@ -1709,7 +1781,30 @@ local function keeper_save_miss(ball,boundary,keeper,entry,entered_at,now)
     local flight=math.max(0,entered_at-now)
     local predicted=root.CFrame+root.AssemblyLinearVelocity*math.min(flight,.25)
     local keeper_root={CFrame=predicted,Position=predicted.Position}
-    local launch_at=math.max(now+.15,entered_at-(dive.Constants.HitboxCurveSeconds or .6))
+    local active=dive.GetMotionSample and dive.GetMotionSample(root)
+    if active then
+        local remaining=math.max(0,dive.Constants.SaveWindowSeconds-active.ElapsedSeconds)
+        if flight<=remaining+.08 then
+            local best=math.huge
+            local previous=ball
+            for i=1,12 do
+                local t=flight*i/12
+                local sample=physics.GetStateAtTime(previous,now+t,boundary)
+                previous=sample
+                local frame=root.CFrame+dive.GetMotionOffset(active,t)
+                local miss=modules.Hitboxes.GetMissVector(frame*modules.Hitboxes.AirReceive.CFrameOffset,
+                    modules.Hitboxes.AirReceive,sample.Position)
+                if typeof(miss)=="Vector3"then best=math.min(best,miss.Magnitude)end
+            end
+            return best
+        end
+    end
+    local lateral=entry-predicted.Position
+    local movement=root.AssemblyLinearVelocity
+    local reverse=movement:Dot(lateral)<0 and math.min(.12,movement.Magnitude*.006)or 0
+    local reaction=.12+reverse
+    if active then reaction=math.max(reaction,dive.Constants.MovementRestoreStartsAtSeconds-active.ElapsedSeconds)end
+    local launch_at=math.max(now+reaction,entered_at-(dive.Constants.HitboxCurveSeconds or .6))
     if launch_at>=entered_at then return (entry-predicted.Position).Magnitude end
     local ok_live,live=pcall(physics.GetStateAtTime,ball,launch_at,boundary)
     if not ok_live or type(live)~="table" then return nil end
@@ -1725,7 +1820,7 @@ local function keeper_save_miss(ball,boundary,keeper,entry,entered_at,now)
         if ok_direction and typeof(direction)=="Vector3" then
             local ok_assist,info=pcall(assist.GetAssist,live,boundary,keeper_root,direction,launch_at)
             local aimed=direction
-            local context={CanExtendReach=true,ElapsedSeconds=0,WarpedSeconds=0,TravelScale=1,Distance=dive.Constants.Distance,GetVerticalOffset=dive.GetVerticalTravel}
+            local context={CanExtendReach=true,ElapsedSeconds=0,WarpedSeconds=0,TravelScale=1,Distance=dive.GetDistance(keeper.Character),GetVerticalOffset=dive.GetVerticalTravel}
             if ok_assist and type(info)=="table" then
                 if type(info.YawRadians)=="number" and info.YawRadians~=0 then
                     local ok_rotate,rotated=pcall(dive.RotateFlatDirection,direction,info.YawRadians)
@@ -1733,7 +1828,7 @@ local function keeper_save_miss(ball,boundary,keeper,entry,entered_at,now)
                 end
                 local up=info.InitialVerticalVelocity or dive.Constants.InitialVerticalVelocity
                 local gravity=info.Gravity or dive.Constants.GravityStudsPerSecondSquared
-                context={CanExtendReach=false,ElapsedSeconds=0,WarpedSeconds=0,TravelScale=info.TravelScale or 1,Distance=dive.Constants.Distance+(info.ExtraDistance or 0),GetVerticalOffset=function(t)return up*t+.5*gravity*t*t end}
+                context={CanExtendReach=false,ElapsedSeconds=0,WarpedSeconds=0,TravelScale=info.TravelScale or 1,Distance=dive.GetDistance(keeper.Character)+(info.ExtraDistance or 0),GetVerticalOffset=function(t)return up*t+.5*gravity*t*t end}
             end
             local ok_hit,hit=pcall(assist.FindFlightIntercept,live,boundary,predicted,aimed,launch_at,context,live)
             if ok_hit and type(hit)=="table" and type(hit.MissDistance)=="number" and type(hit.OffsetSeconds)=="number" and hit.OffsetSeconds<entered_at-launch_at then
@@ -1746,15 +1841,22 @@ end
 
 local function choose_shot(target,goal)
     if not target or not goal or config.ShotPlacement~="Auto" or not shot_redirect_enabled() then return target end
-    local keeper
+    if is_goalkeeper()or not(owns_ball()or modules.ClientShoot.IsCharging()or state.AutoShot or state.FlickVolley or state.VolleyTarget)then return target end
+    local keeper,nearest
     local team=select(2,goal_for(false))
     for _,actor in ipairs(state.Actors)do
-        if actor.Keeper and actor.Root.Parent and (actor.Team==team or team=="Practice")then keeper=actor break end
+        if actor.Keeper and actor.Root.Parent and(actor.Team==team or team=="Practice")then
+            local distance=(actor.Root.Position-goal.Position).Magnitude
+            if not nearest or distance<nearest then keeper,nearest=actor,distance end
+        end
     end
     if not keeper then return target end
     local now_clock=os.clock()
-    if state.ShotSearchAt and now_clock-state.ShotSearchAt<.2 and state.ShotSearchGoal==goal
-        and state.ShotSearchKeeper and (keeper.Root.Position-state.ShotSearchKeeper).Magnitude<1 then
+    if state.ShotSearchAt and now_clock-state.ShotSearchAt<(mobile_device and .45 or .2) and state.ShotSearchGoal==goal
+        and state.ShotSearchKeeper and (keeper.Root.Position-state.ShotSearchKeeper).Magnitude<.75
+        and state.ShotSearchOrigin and(local_root().Position-state.ShotSearchOrigin).Magnitude<.75
+        and state.ShotSearchVelocity and(keeper.Root.AssemblyLinearVelocity-state.ShotSearchVelocity).Magnitude<2
+        and state.ShotSearchDiving==modules.Dive.IsDiveConstraintActive(keeper.Root)then
         return state.ShotSearchTarget or target
     end
     local _,boundary=modules.Renderer.GetAuthoritativeMovementState()
@@ -1767,8 +1869,8 @@ local function choose_shot(target,goal)
     state.TargetGoal=goal
     local best,best_miss=target,-math.huge
     local started=os.clock()
-    for index=1,math.min(#candidates,6)do
-        if os.clock()-started>.03 then break end
+    for index=1,math.min(#candidates,mobile_device and 3 or 6)do
+        if os.clock()-started>(mobile_device and .005 or .012)then break end
         local candidate=candidates[index].Target
         state.ShotProbeTarget=candidate
         state.ShotSolution=nil
@@ -1809,6 +1911,9 @@ local function choose_shot(target,goal)
     state.ShotSearchAt=now_clock
     state.ShotSearchGoal=goal
     state.ShotSearchKeeper=keeper.Root.Position
+    state.ShotSearchOrigin=local_root().Position
+    state.ShotSearchVelocity=keeper.Root.AssemblyLinearVelocity
+    state.ShotSearchDiving=modules.Dive.IsDiveConstraintActive(keeper.Root)
     state.ShotSearchTarget=best
     return best
 end
@@ -1869,7 +1974,8 @@ local function aim_payload(original)
         end
         return original
     end
-    if (shot_redirect_enabled() or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper() then
+    if (shot_redirect_enabled() or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() and not modules.Pass.IsCharging() and not is_goalkeeper()
+        and(owns_ball()or modules.ClientShoot.IsCharging()or state.AutoShot or state.FlickVolley or state.VolleyTarget)then
         return solve_shot(shot_target(), nil, false, original) or original
     end
     return original
@@ -1914,13 +2020,15 @@ local function rewrite_command(command)
     end
     if not is_goalkeeper() and command.PassType == "Shot" and shot_curve() then command.Curve = shot_curve() end
     if not is_goalkeeper()and command.PassType == "Shot" and (shot_redirect_enabled() or config.UnsavableShot or state.FlickVolley or state.VolleyTarget or (config.FeintShot and state.FeintActive)) and shot_target() then
-        local ray, _, _, direction, applied_curve = solve_shot(shot_target(), command.ChargeSeconds, false, command.AimDirection)
+        local ray, solved_velocity, _, direction, applied_curve = solve_shot(shot_target(), command.ChargeSeconds, false, command.AimDirection)
         if ray then
             command.AimDirection = ray
             command.KickDirection = direction
             command.TargetPosition = ray.TargetPosition
             command.Curve = applied_curve
             state.CommittedShotCurve=applied_curve
+            state.CommittedShotVelocity=solved_velocity
+            state.CommittedShotCharge=command.ChargeSeconds
             state.CommittedShotAt=os.clock()
         end
     end
@@ -1966,11 +2074,16 @@ local function install_hooks()
         return function(character, velocity, movement, curve, charge)
             if character == local_player.Character and not state.MagnetSteal and not is_goalkeeper() and config.CurveShot then
                 local solved=state.ShotSolution
-                if state.CommittedShotCurve and os.clock()-(state.CommittedShotAt or 0)<.6 and not state.ShotProbeTarget then
+                if solved and os.clock()-solved.At<.25 and typeof(velocity)=="Vector3"
+                    and(velocity-solved.Velocity).Magnitude<.5 and math.abs((charge or solved.Charge)-solved.Charge)<.005 then
+                    curve=solved.AppliedCurve
+                elseif state.CommittedShotCurve and os.clock()-(state.CommittedShotAt or 0)<.6 and not state.ShotProbeTarget
+                    and typeof(velocity)=="Vector3"and typeof(state.CommittedShotVelocity)=="Vector3"
+                    and(velocity-state.CommittedShotVelocity).Magnitude<.5
+                    and math.abs((charge or state.CommittedShotCharge or 0)-(state.CommittedShotCharge or 0))<.005 then
                     curve=state.CommittedShotCurve
                 else
-                    curve=solved and os.clock()-solved.At<1 and typeof(velocity)=="Vector3"
-                        and (velocity-solved.Velocity).Magnitude<2 and solved.AppliedCurve or shot_curve()
+                    curve=shot_curve(nil,charge)
                 end
             end
             return original(character, velocity, movement, curve, charge)
@@ -2358,8 +2471,9 @@ local function render_esp()
     for _, segment in path_lines do segment.Visible = false end
     for _, marker in bounce_labels do marker.Visible = false end
     if config.FlightPath then
+        local a,a_visible
+        if state.Points[1]then a,a_visible=project(camera,state.Points[1])end
         for i = 2, #state.Points do
-            local a, a_visible = project(camera, state.Points[i - 1])
             local b, b_visible = project(camera, state.Points[i])
             if a_visible and b_visible then
                 local segment = path_lines[i - 1]
@@ -2369,15 +2483,16 @@ local function render_esp()
                 end
                 set_line(segment, a, b, config.PathColor, 2)
             end
+            a,a_visible=b,b_visible
         end
-        for i,position in ipairs(state.Bounces)do
+        if config.FlightPathText then for i,position in ipairs(state.Bounces)do
             local marker=bounce_labels[i]
             if not marker then marker=label(overlay,"BOUNCE",config.PathColor)bounce_labels[i]=marker end
             local point,visible=project(camera,position)
             marker.Position=UDim2.fromOffset(point.X,point.Y-8)
             marker.TextColor3=config.PathColor
             marker.Visible=visible
-        end
+        end end
     end
     landing_label.Visible = false
     landing_marker.Transparency = 1
@@ -2392,7 +2507,7 @@ local function render_esp()
         landing_label.Position = UDim2.fromOffset(p.X, p.Y - 10)
         landing_label.TextColor3 = config.LandingColor
         landing_label.Text = string.format("LAND  %.1fs", math.max(0, hit.Time - modules.Clock.GetSmoothedServerTime()))
-        landing_label.Visible = visible
+        landing_label.Visible = visible and config.FlightPathText
     end
 end
 
@@ -2419,12 +2534,18 @@ local function update_prediction()
     state.BallState = current
     state.Boundary = boundary
     state.BallTime = now
-    table.clear(state.Points)
-    table.clear(state.Bounces)
-    if config.FlightPath then
+    local prediction_clock=os.clock()
+    local visual_changed=state.PathEnabled~=config.FlightPath or state.PathSeconds~=config.FlightPathSeconds
+        or state.LandingEnabled~=config.LandingMarker
+    local refresh_visual=visual_changed or prediction_clock>=(state.NextPathAt or 0)
+    if not config.FlightPath then table.clear(state.Points)table.clear(state.Bounces)end
+    if not config.LandingMarker then state.Landing=nil end
+    if refresh_visual and config.FlightPath then
+        table.clear(state.Points)
+        table.clear(state.Bounces)
         state.Points[1] = current.Position
         local sample = current
-        local step = 0.06
+        local step = math.max(mobile_device and .1 or .06,config.FlightPathSeconds/(mobile_device and 40 or 72))
         for i = 1, math.ceil(config.FlightPathSeconds / step) do
             local before=sample
             sample = modules.Physics.GetStateAtTime(sample, now + i * step, boundary)
@@ -2435,7 +2556,11 @@ local function update_prediction()
             if sample.Mode == "Resting" then break end
         end
     end
-    state.Landing = config.LandingMarker and modules.Physics.GetLanding(current, boundary, now, config.FlightPathSeconds) or nil
+    if refresh_visual then
+        state.Landing = config.LandingMarker and modules.Physics.GetLanding(current,boundary,now,config.FlightPathSeconds)or nil
+        state.NextPathAt=prediction_clock+(mobile_device and .15 or .1)
+        state.PathEnabled=config.FlightPath state.PathSeconds=config.FlightPathSeconds state.LandingEnabled=config.LandingMarker
+    end
     state.Crossing = nil
     if config.AutoGoalkeeper and is_goalkeeper() then
         local goal = goal_for(true)
@@ -2448,7 +2573,7 @@ local function update_prediction()
                 local center=Vector3.new(plane.X,(mouth.BottomY+mouth.TopY)*.5,plane.Z)
                 local box={CFrame=CFrame.lookAt(center,center+mouth.Forward),Size=Vector3.new(mouth.HalfWidth*2+2,mouth.TopY-mouth.BottomY+2,.8)}
                 local position,time=modules.Physics.GetFirstBoxEntry(current,boundary,box,now,2.5,false)
-                if position and time then state.Crossing={Position=position,Time=time,Box=box}end
+                if position and time then state.Crossing={Position=position,Time=time,Box=box,CalculatedAt=os.clock()}end
             end
         end
     end
@@ -2659,7 +2784,11 @@ local function keeper_step()
     if not ball_state or not boundary or modules.Renderer.GetOwnedUserId()then state.Crossing=nil return false end
     local current=modules.Physics.GetStateAtTime(ball_state,now,boundary)
     if not current or current.Velocity:Dot(mouth.Forward)>=-.1 then state.Crossing=nil return false end
-    local position,time=modules.Physics.GetFirstBoxEntry(current,boundary,crossing.Box,now,2.5,false)
+    local position,time=crossing.Position,crossing.Time
+    if os.clock()-(crossing.CalculatedAt or 0)>.06 then
+        position,time=modules.Physics.GetFirstBoxEntry(current,boundary,crossing.Box,now,2.5,false)
+        crossing.CalculatedAt=os.clock()
+    end
     if not position or not time then state.Crossing=nil return false end
     crossing.Position,crossing.Time=position,time
     delta=position-root.Position
@@ -3137,7 +3266,8 @@ local function set_config(key,value)
         state.KeeperPositionTarget=nil state.KeeperPositionGoal=nil
         state.KeeperPositionMoving=false
     end
-    if key=="ShotCurve" or key=="CurveShot" or key=="CurveSide" or key=="FeintShot" or key=="ShotRandomizer" then state.ShotSolution=nil state.ShotSearchAt=nil end
+    if key=="CurveShot"or key=="CurveSide"or key=="FeintShot"or key=="ShotRandomizer"or key=="ShotPlacement"
+        or key=="ShotBoost"or key=="ShotBoostMultiplier"then state.ShotSolution=nil state.ShotSearchAt=nil state.AdaptiveCurve=nil end
     if key=="FeintShot" and not value then state.FeintActive, state.FeintSide = false, nil end
     if key=="InfiniteStamina"then modules.Sprint.SetUnlimitedStamina("AxisSoccer",value)end
     if key=="IgnoreCorrections"then set_correction_block(value)end
@@ -3216,7 +3346,9 @@ local ok, err = xpcall(function()
             guarded("targets", function()
                 if shot_redirect_enabled() or config.UnsavableShot or config.ShotPreview or config.FeintShot or config.CurveShot then
                     local target,goal=select_shot()
-                    target=choose_shot(target,goal)
+                    if not is_goalkeeper()and(owns_ball()or modules.ClientShoot.IsCharging()or state.AutoShot or state.FlickVolley or state.VolleyTarget)then
+                        target=choose_shot(target,goal)
+                    end
                     if state.TargetGoal~=goal or not target or not state.ShotTarget or(target-state.ShotTarget).Magnitude>.1 then state.ShotCrossing=nil end
                     state.ShotTarget,state.TargetGoal=target,goal
                 else state.ShotTarget, state.TargetGoal = nil, nil end
@@ -3226,8 +3358,13 @@ local ok, err = xpcall(function()
         if ready("prediction", config.AutoGoalkeeper and .04 or .1) then guarded("prediction", update_prediction) end
         guarded("automation", automation_step)
     end)
-    connect(run_service.RenderStepped, function()
-        if state.Alive then guarded("visuals", render_esp) end
+    local visual_elapsed=0
+    connect(run_service.RenderStepped, function(dt)
+        if not state.Alive then return end
+        visual_elapsed+=dt
+        if mobile_device and visual_elapsed<1/30 then return end
+        visual_elapsed=0
+        guarded("visuals", render_esp)
     end)
     connect(local_player.CharacterRemoving, function()
         state.ShotInput, state.PassInput, state.PassTarget, state.PassPoint = nil, nil, nil, nil
