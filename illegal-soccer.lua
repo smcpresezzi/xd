@@ -47,7 +47,7 @@ return function(context)
     local controls={}
     local bindsReady=false
     local bound={ShotAimbot=true,AutoGoalkeeper=true,BallMagnet=true,SpeedBoost=true,ItemAimbot=true,
-        AutoPlay=true,AutoFlick=true,AutoBicycle=true,TackleSpeed=true,IgnoreCorrections=true,HazardShield=true}
+        LateShotCancel=true,AutoPlay=true,AutoFlick=true,AutoBicycle=true,TackleSpeed=true,IgnoreCorrections=true,HazardShield=true}
     local function toggle(section,key,name,color)
         local control=section:Toggle({Name=name,Flag="IS_"..key,Default=config[key],Callback=function(value)context.Set(key,value)end})
         controls[key]=control
@@ -86,6 +86,8 @@ return function(context)
     toggle(shots,"FlickShot","Flick shot")
     toggle(shots,"CurveShot","Curve shot")
     dropdown(shots,"CurveSide","Curve side",{"Auto","Mine","Left","Right"})
+    toggle(shots,"LateShotCancel","Late shot cancel")
+    slider(shots,"LateCancelMargin","Cancel safety (ms)",10,100,5)
     toggle(shots,"FeintShot","Feint shot")
     slider(shots,"FeintChance","Feint chance (%)",0,100)
     toggle(shots,"ShotPreview","Shot preview","ShotColor")
@@ -599,6 +601,7 @@ local config = {
     ShotAimbot = false, ShotPlacement = "Auto", ShotRandomizer = false, TargetPost = "Automatic", ShootRange = 400,
     SuperchargeRange = 400, VolleyShotRange = 400, ShotTypes = {"Ground"}, ShotBoost = false, ShotBoostMultiplier = 1.5,
     UnsavableShot = false, PerfectCharge = false, AutoPass = false, SafePass = false, PassClearance = 7,
+    LateShotCancel=false,LateCancelMargin=30,
     CurveShot = false, CurveSide = "Auto", FeintShot = false, FeintChance = 50, FlickShot = false, KeeperAutoTackle = false, KeeperTackleRange = 12,
     KeeperDiveOnContact = true, KeeperDiveRange = 10, KeeperAutoPosition = false, KeeperArcDepth = 6,
     AutoVolley = false, AutoVolleyRange = 80, TackleAimbot = false, AutoTackle = false,
@@ -1198,6 +1201,7 @@ end
 
 local function dribble_step(root)
     local now=os.clock()
+    if state.LateCancelPending then return end
     if now<(state.NextDribbleAt or 0) or modules.Dodge.IsDribbling() then return end
     if now>=(state.NextDribbleScanAt or 0) then
         state.NextDribbleScanAt=now+.15
@@ -1217,7 +1221,9 @@ local function dribble_step(root)
     end
     for _,enemy in ipairs(state.Actors)do
         if state.DribbleThreats[enemy.Character] and dribble_threat(root,enemy,now) then
+            state.AutomaticDribble=true
             local started=dribble_tap()
+            state.AutomaticDribble=false
             state.NextDribbleAt=now+(started and modules.DodgeAction.Constants.RepeatDelaySeconds or .12)
             return
         end
@@ -2034,6 +2040,87 @@ local function rewrite_command(command)
     end
 end
 
+local lateCancel=(function()
+    local controller={}
+    local pending,generation,lastFrame=nil,0,1/60
+    local nativeBegin,nativeEnd
+    local possessionCharacter,hadBall,feinted=nil,false,false
+    function controller.Bind(beginInput,endInput)
+        nativeBegin=beginInput or nativeBegin
+        nativeEnd=endInput or nativeEnd
+    end
+    function controller.Clear(cancel)
+        local had=pending~=nil
+        pending=nil state.LateCancelPending=false
+        if cancel and had and modules.ClientShoot.IsCharging()then modules.ClientShoot.CancelCharge()end
+    end
+    function controller.BeginShot()
+        generation+=1
+        controller.Clear(false)
+    end
+    function controller.Pending()
+        return pending~=nil
+    end
+    function controller.Queue(input,processed)
+        if processed or state.AutomaticDribble or state.LateCancelExecuting or not config.LateShotCancel or is_goalkeeper()or not owns_ball()
+            or feinted or not modules.ClientShoot.IsCharging()or modules.Dodge.IsDribbling()
+            or not modules.Controls.IsInput("Dribble",input)or not can_act()
+            or modules.Controls.IsOnCooldown("Dribble")then return false end
+        if pending then return true end
+        local character=local_player.Character
+        local progress=math.clamp(modules.ClientShoot.GetFullChargeProgress()or 0,0,1)
+        local constants=modules.KickCore.Constants
+        local margin=math.max(math.clamp(config.LateCancelMargin or 30,10,100)/1000,math.min(lastFrame,.05))
+        local remaining=math.max(0,constants.MaximumChargeSeconds*(1-progress)+(constants.FullChargeGraceSeconds or 0)-margin)
+        pending={Input=input,Character=character,Generation=generation,Deadline=os.clock()+remaining}
+        state.LateCancelPending=true
+        return true
+    end
+    function controller.AutoQueue()
+        local hasBall=owns_ball()
+        if possessionCharacter~=local_player.Character or not hasBall then
+            controller.Clear(false)
+            possessionCharacter=local_player.Character
+            feinted=false
+        elseif not hadBall then
+            feinted=false
+        end
+        hadBall=hasBall
+        if pending then return true end
+        if not hasBall or feinted or not state.Alive then return false end
+        local input=modules.Controls.CreateInput("Dribble")
+        return input and controller.Queue(input,false)or false
+    end
+    function controller.EndDribble(input)
+        if not state.LateCancelExecuting and pending and(pending.Input==input or modules.Controls.IsInput("Dribble",input))then return true end
+        return false
+    end
+    function controller.Step(dt)
+        lastFrame=math.clamp(dt or lastFrame,1/240,.1)
+        controller.AutoQueue()
+        local queued=pending
+        if not queued then return end
+        if not state.Alive or not config.LateShotCancel or local_player.Character~=queued.Character
+            or queued.Generation~=generation or is_goalkeeper()or not owns_ball()
+            or not modules.ClientShoot.IsCharging()then controller.Clear(false)return end
+        if not can_act()then controller.Clear(true)return end
+        if os.clock()<queued.Deadline then return end
+        state.LateCancelExecuting=true
+        local ok,started=pcall(dribble_tap)
+        state.LateCancelExecuting=false
+        if not ok then state.Errors["late shot cancel"]=tostring(started)return end
+        if not started then return end
+        feinted=true
+        pending=nil state.LateCancelPending=false
+        state.ShotInput=nil state.FullChargeAt=nil state.AutoShot=false
+        state.FeintActive=false state.FeintCommitted=false
+        state.CancelShotUntil=os.clock()+.6
+        state.Errors["late shot cancel"]=nil
+    end
+    return controller
+end)()
+
+
 local function install_hooks()
     patch(modules.GoalEffects,"Play",function(original)
         return function(name,position,goal_part)
@@ -2128,6 +2215,26 @@ local function install_hooks()
             end
         end)
     end
+    patch(modules.Dodge,"HandleInputBegan",function(original)
+        lateCancel.Bind(original,nil)
+        return function(input,processed,...)
+            if lateCancel.Queue(input,processed)then return true end
+            return original(input,processed,...)
+        end
+    end)
+    patch(modules.Dodge,"HandleInputEnded",function(original)
+        lateCancel.Bind(nil,original)
+        return function(input,...)
+            if lateCancel.EndDribble(input)then return true end
+            return original(input,...)
+        end
+    end)
+    patch(modules.ClientShoot,"CancelCharge",function(original)
+        return function(...)
+            lateCancel.Clear(false)
+            return original(...)
+        end
+    end)
     patch(modules.ClientShoot, "HandleInputBegan", function(original)
         return function(input, processed, ...)
             if is_goalkeeper()then return original(input,processed,...)end
@@ -2137,6 +2244,7 @@ local function install_hooks()
             end
             if not processed and modules.Controls.IsInput("Kick", input) then
                 if not modules.ClientShoot.IsCharging() then
+                    lateCancel.BeginShot()
                     state.FeintActive, state.FeintSide, state.FeintCommitted, state.FeintRealTarget = false, nil, false, nil
                     state.ShotRandomSeed=math.random(1,2147483646)
                     state.ShotStartedWithBall=owns_ball()
@@ -2151,6 +2259,7 @@ local function install_hooks()
     patch(modules.ClientShoot, "HandleInputEnded", function(original)
         return function(input, ...)
             if is_goalkeeper()then return original(input,...)end
+            if modules.Controls.IsInput("Kick",input)and lateCancel.AutoQueue()then return true end
             if within_shoot_range() and (config.PerfectCharge or config.UnsavableShot) and not state.ReleasingPerfect and state.ShotInput == input and modules.ClientShoot.IsCharging() then
                 return true
             end
@@ -3001,7 +3110,7 @@ local function automation_step()
         modules.Sprint.ToggleSprintButton()
         state.OwnedSprintToggle = true
     end
-    if within_shoot_range() and (config.PerfectCharge or config.UnsavableShot or state.AutoShot) and state.ShotInput and modules.ClientShoot.IsCharging() then
+    if not lateCancel.Pending()and within_shoot_range() and (config.PerfectCharge or config.UnsavableShot or state.AutoShot) and state.ShotInput and modules.ClientShoot.IsCharging() then
         if (modules.ClientShoot.GetFullChargeProgress() or 0) >= 1 then
             state.FullChargeAt = state.FullChargeAt or os.clock()
         end
@@ -3193,6 +3302,7 @@ end
 
 local function unload()
     if not state.Alive then return end
+    lateCancel.Clear(true)
     state.Alive = false
     if state.MouseUnlockCleanup then state.MouseUnlockCleanup()state.MouseUnlockCleanup=nil end
     if state.MobileGui then state.MobileGui:Destroy()state.MobileGui=nil end
@@ -3229,6 +3339,7 @@ end
 
 local function set_config(key,value)
     config[key]=value
+    if key=="LateShotCancel"and not value then lateCancel.Clear(true)end
     if key=="AutoPlay" then
         local bundled={"BallMagnet","AutoDribble","AutoPass","AutoTackle","AutoSprint",
             "ShotAimbot","PerfectCharge","AutoVolley","SpeedBoost"}
@@ -3281,6 +3392,7 @@ end
 local function build_ui()
     local ui=assert(loadstring(Sources.UI))()({Config=config,State=state,Set=set_config,Unload=unload,Connect=connect,
         CancelShot=function()
+            lateCancel.Clear(false)
             state.CancelShotUntil=os.clock()+.6
             if modules.ClientShoot.IsCharging() then modules.ClientShoot.CancelCharge() end
             state.ShotInput=nil
@@ -3320,6 +3432,9 @@ local ok, err = xpcall(function()
             end
         end)
     end
+    connect(run_service.Heartbeat,function(dt)
+        if state.Alive then guarded("late shot cancel",lateCancel.Step,dt)end
+    end)
     local accumulator = 0
     local function mark_dribble(model,active)
         if not config.AutoDribble or not owns_ball() or typeof(model)~="Instance" or not model:IsA("Model") or model==local_player.Character then return end
@@ -3367,6 +3482,7 @@ local ok, err = xpcall(function()
         guarded("visuals", render_esp)
     end)
     connect(local_player.CharacterRemoving, function()
+        lateCancel.Clear(false)
         state.ShotInput, state.PassInput, state.PassTarget, state.PassPoint = nil, nil, nil, nil
         state.VolleyTarget,state.VolleyGoal=nil,nil
         state.MoveDirection, state.DiveDirection, state.Crossing = nil, nil, nil
